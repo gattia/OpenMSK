@@ -23,21 +23,43 @@ import gc
 import time
 from utils import clip_femur_top
 
-def main(path_image, path_save, path_config, model_name='acl_qdess_bone_july_2024'):
+# T2 analysis constants
+T2_MIN_VALID = 0
+T2_MAX_VALID = 80
+DEPTH_THRESHOLD = 0.5
+DEEP_OFFSET = 100
+SUPERFICIAL_OFFSET = 200
+
+def determine_knee_side(seg_array, sitk_seg_subregions):
+    """Determine if knee is left or right based on cartilage positions."""
+    # figure out if right or left leg. Use the medial/lateral tibial cartilage to determine side
+    loc_med_cart = np.mean(np.where(seg_array == 3), axis=1)
+    loc_lat_cart = np.mean(np.where(seg_array == 4), axis=1)
+
+    # get rotation matrix
+    rotation_matrix = np.array(sitk_seg_subregions.GetDirection()).reshape(3,3)
+
+    # flip the ijk becuase simpleitk returns them in the opposite order of the image space
+    # then apply rotation matrix to get them in the correct xyz space orientation
+    # not worrying about translations - only care about relative position along x (med/lat) axis.
+    loc_med_cart_xyz = rotation_matrix @ loc_med_cart[::-1]
+    loc_lat_cart_xyz = rotation_matrix @ loc_lat_cart[::-1]
+
+    loc_med_cart_x = loc_med_cart_xyz[0]
+    loc_lat_cart_x = loc_lat_cart_xyz[0]
+
+    # get the xyz location, not the ijk index, for the medial and lateral tibial cartilages
+    # then use this to determine the side of the knee.
+    if loc_med_cart_x > loc_lat_cart_x:
+        return 'right'
+    elif loc_med_cart_x < loc_lat_cart_x:
+        return 'left'
+
+def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
     print('Loading Inputs and Configurations...')
-    # read two inputs arguments - where to get data, and where to save it. 
-    path_image = sys.argv[1]
-    path_save = sys.argv[2]
-    # Get the model name... by default to most recent bone seg model. 
-    if len(sys.argv) > 3:
-        model_name = sys.argv[3]
-    else:
-        model_name = 'acl_qdess_bone_july_2024'
         
     print('Path to image analyzing:', path_image)
 
-    # Add path of current file to sys.path
-    # sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 
 
     # READ IN CONFIGURATION STUFF
@@ -159,17 +181,17 @@ def main(path_image, path_save, path_config, model_name='acl_qdess_bone_july_202
 
     # create 3D surfaces w/ cartilage thickness & compute thickness metrics
     dict_results = {}
-    for bone_name, dict_ in dict_bones.items():
+    for bone_name, bone_config in dict_bones.items():
         # create bone mesh and crop as appropriate
         bone_mesh = mskt.mesh.BoneMesh(
             seg_image=sitk_seg,
-            label_idx=dict_['tissue_idx'],
-            list_cartilage_labels=dict_['list_cart_labels'],
+            label_idx=bone_config['tissue_idx'],
+            list_cartilage_labels=bone_config['list_cart_labels'],
             bone=bone_name,
-            crop_percent=dict_['crop_percent'],
+            crop_percent=bone_config['crop_percent'],
         )
         bone_mesh.create_mesh(smooth_image_var=0.5)
-        bone_mesh.resample_surface(clusters=dict_['n_points'])
+        bone_mesh.resample_surface(clusters=bone_config['n_points'])
         
         # fix bone mesh
         bone_mesh.fix_mesh()
@@ -187,7 +209,7 @@ def main(path_image, path_save, path_config, model_name='acl_qdess_bone_july_202
             cart_labels = [11, 12, 13, 14, 15]
             bone_mesh.list_cartilage_labels=cart_labels
         else:
-            cart_labels = dict_['list_cart_labels']
+            cart_labels = bone_config['list_cart_labels']
         # assign labels to bone surface
         bone_mesh.assign_cartilage_regions()
         
@@ -238,8 +260,8 @@ def main(path_image, path_save, path_config, model_name='acl_qdess_bone_july_202
 
             # get T2 as array and set values outside of expected/reasonable range to nan
             t2_array = sitk.GetArrayFromImage(sitk_t2map)
-            t2_array[t2_array>=80] = np.nan
-            t2_array[t2_array<=0] = np.nan
+            t2_array[t2_array >= T2_MAX_VALID] = np.nan
+            t2_array[t2_array <= T2_MIN_VALID] = np.nan
             
             
 
@@ -254,16 +276,16 @@ def main(path_image, path_save, path_config, model_name='acl_qdess_bone_july_202
                     dict_results[f'{cart_region}_t2_ms_median'] = median_t2
             
             # convert segmentation into simple depth dependent version of the segmentation.
-            for bone_name, dict_ in dict_bones.items():
-                bone_mesh = dict_['mesh']
+            for bone_name, bone_config in dict_bones.items():
+                bone_mesh = bone_config['mesh']
                 # update bone_mesh list_cartilage_labels to be the original ones
                 # this is only really needed for the femur, but we do it for all bones... just in case. 
-                bone_mesh.list_cartilage_labels = dict_['list_cart_labels']
+                bone_mesh.list_cartilage_labels = bone_config['list_cart_labels']
                 # assign the segmentation mask to be the original one.. 
                 bone_mesh.seg_image = sitk_seg
-                bone_new_seg, bone_rel_depth = bone_mesh.break_cartilage_into_superficial_deep(rel_depth_thresh=0.5, return_rel_depth=True, resample_cartilage_surface=10_000)
-                dict_['bone_new_seg'] = bone_new_seg
-                dict_['bone_rel_depth'] = bone_rel_depth
+                bone_new_seg, bone_rel_depth = bone_mesh.break_cartilage_into_superficial_deep(rel_depth_thresh=DEPTH_THRESHOLD, return_rel_depth=True, resample_cartilage_surface=10_000)
+                bone_config['bone_new_seg'] = bone_new_seg
+                bone_config['bone_rel_depth'] = bone_rel_depth
             new_seg_combined = mskt.image.cartilage_processing.combine_depth_region_segs(
                 sitk_seg_subregions,
                 [x['bone_new_seg'] for x in dict_bones.values()],
@@ -276,7 +298,7 @@ def main(path_image, path_save, path_config, model_name='acl_qdess_bone_july_202
             # store as superficial / deep T2 maps. 
             seg_array_depth = sitk.GetArrayFromImage(new_seg_combined)
             for cart_idx, cart_region in dict_regions['cart'].items():
-                for depth_idx, depth_name in [(100, 'deep'), (200, 'superficial')]:
+                for depth_idx, depth_name in [(DEEP_OFFSET, 'deep'), (SUPERFICIAL_OFFSET, 'superficial')]:
                     cart_idx_depth = cart_idx + depth_idx
                     if cart_idx_depth in seg_array_depth:
                         mean_t2 = np.nanmean(t2_array[seg_array_depth == cart_idx_depth])
@@ -307,29 +329,9 @@ def main(path_image, path_save, path_config, model_name='acl_qdess_bone_july_202
     
     # look at the config  says to analyze nsm bone or bone and cartilage... 
     if config['perform_bone_only_nsm'] or config['perform_bone_and_cart_nsm']:
-        # figure out if right or left leg. Use the medial/lateral tibial cartilage to determine side
-        loc_med_cart = np.mean(np.where(seg_array == 3), axis=1)
-        loc_lat_cart = np.mean(np.where(seg_array == 4), axis=1)
-
-        # get rotation matrix
-        rotation_matrix = np.array(sitk_seg_subregions.GetDirection()).reshape(3,3)
-
-        # flip the ijk becuase simpleitk returns them in the opposite order of the image space
-        # then apply rotation matrix to get them in the correct xyz space orientation
-        # not worrying about translations - only care about relative position along x (med/lat) axis.
-        loc_med_cart_xyz = rotation_matrix @ loc_med_cart[::-1]
-        loc_lat_cart_xyz = rotation_matrix @ loc_lat_cart[::-1]
-
-        loc_med_cart_x = loc_med_cart_xyz[0]
-        loc_lat_cart_x = loc_lat_cart_xyz[0]
-
-        # get the xyz location, not the ijk index, for the medial and lateral tibial cartilages
-        # then use this to determine the side of the knee.
-
-        if loc_med_cart_x > loc_lat_cart_x:
-            side = 'right'
-        elif loc_med_cart_x < loc_lat_cart_x:
-            side = 'left'
+        # Determine knee side by comparing medial vs lateral tibial cartilage positions
+        # in world coordinates after applying rotation matrix
+        side = determine_knee_side(seg_array, sitk_seg_subregions)
 
         # if side is left, flip the mesh to be a right knee
         if side == 'left':
@@ -367,7 +369,7 @@ if __name__ == "__main__":
     # Read command line arguments
     path_image = sys.argv[1]
     path_save = sys.argv[2]
-    model_name = sys.argv[4] if len(sys.argv) > 4 else 'acl_qdess_bone_july_2024'
+    model_name = sys.argv[3] if len(sys.argv) > 3 else 'goyal_sagittal'
     
     # set path to config as config.json in current directory
     path_config = os.path.join(os.path.dirname(__file__), 'config.json')
