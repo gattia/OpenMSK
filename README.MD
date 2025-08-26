@@ -99,13 +99,32 @@ not currently public - please reach out if it is of interest..
 If you do not want to do any NSM analyses, this can be turned
 off, by setting `perform_bone_and_cart_nsm` to `false`.
 
+### Key Configuration Options
 
+Additional configuration parameters in `config.json`:
+- `clip_femur_top`: (true/false) - Clips the superior portion of femur meshes during NSM preprocessing 
+- `batch_size`: (default: 32) - Batch size for segmentation model inference
+- `default_seg_model`: (default: "goyal_sagittal") - Default segmentation model when none specified
 
 ### Run script
 To run script: 
 ```bash
-python /path/to/dosma_knee_seg.py <path_to_qdess_image> <path_to_save_results>
+python /path/to/dosma_knee_seg.py <path_to_qdess_image> <path_to_save_results> [model_name]
 ```
+
+**Input Format Support:**
+- DICOM directories (for full T2 analysis)
+- NIfTI files (`.nii`, `.nii.gz`) - RSS/preprocessed images
+- NRRD files (`.nrrd`)
+
+**Model Selection:**
+The pipeline uses `goyal_sagittal` as the default segmentation model, which provides a good balance of speed and accuracy for sagittal knee MRI images. If no model is specified, this will be used automatically.
+
+**T2 Analysis Requirements:**
+- T2 mapping only works with DICOM input that contains GL (Gradient Linearity) and TG (Transmit Gain) private tags
+- These tags may be removed during DICOM anonymization processes
+- T2 values are automatically clipped to the physiological range of 0-80ms
+- Analysis includes both full-thickness cartilage and depth-dependent layers (superficial/deep cartilage)
 
 ### Results
 
@@ -123,7 +142,7 @@ All results will be saved in <path_to_save_results>. This will include
         - NSM_recon_fem_cart_mesh_NSM_orig.vtk
     - NSM fitted parameters in NSM_recon_params.json
         - NSM fitted latent vector (length 512)
-        - BScore based on this latent vector, and pre-training on whole OAI
+        - BScore: osteoarthritis severity score derived from shape patterns learned on the Osteoarthritis Initiative dataset
         - registration parameters used to align femur in NSM space
         - assd metrics for the error in the reconstructed bone/cart surfaces. 
 
