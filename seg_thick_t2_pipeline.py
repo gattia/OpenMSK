@@ -21,7 +21,11 @@ import warnings
 import torch
 import gc
 import time
+import logging
 from utils import clip_femur_top
+
+# Setup simple logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # T2 analysis constants
 T2_MIN_VALID = 0
@@ -54,13 +58,82 @@ def determine_knee_side(seg_array, sitk_seg_subregions):
         return 'right'
     elif loc_med_cart_x < loc_lat_cart_x:
         return 'left'
+    else:
+        raise ValueError("Unable to determine knee side: medial and lateral cartilage have same x-coordinate")
+
+def segment_image_dosma(volume, model_name, config):
+    """
+    Segment image using DOSMA models.
+    
+    Args:
+        volume: Medical volume to segment
+        model_name: Name of segmentation model to use
+        config: Configuration dictionary
+        
+    Returns:
+        sitk.Image: segmentation image in SimpleITK format
+    """
+    # Validate model file exists for DOSMA models
+    model_path = config['models'].get(model_name)
+    if not model_path:
+        raise ValueError(f"Model '{model_name}' not found in config")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    logging.info('Loading Model...')
+    # load the appropriate segmentation model & its weights
+    # set the actual model class being used
+    if model_name == 'staple':
+        logging.info('Using Staple Model')
+        model = StanfordQDessBoneUNet2DSTAPLE(
+            config['models']['goyal_sagittal'],
+            config['models']['goyal_coronal'],
+            config['models']['goyal_axial']
+        )
+    else:
+        orig_model_image_size = (512,512)
+        if 'cube' in model_name:
+            logging.info('Using Cube Model')
+            model_class = StanfordCubeBoneUNet2D
+        elif model_name == 'goyal_sagittal':
+            logging.info('Using Goyal Sagittal Model')
+            model_class = StanfordQDessBoneUNet2DSagittal
+            orig_model_image_size = None
+        elif model_name == 'goyal_coronal':
+            logging.info('Using Goyal Coronal Model')
+            model_class = StanfordQDessBoneUNet2DCoronal
+            orig_model_image_size = None
+        elif model_name == 'goyal_axial':
+            logging.info('Using Goyal Axial Model')
+            model_class = StanfordQDessBoneUNet2DAxial
+            orig_model_image_size = None
+        
+        else:
+            model_class = StanfordQDessBoneUNet2D
+        # load the model. 
+        logging.info(f'Loading {model_name} model, orig_model_image_size: {orig_model_image_size}')
+        model = model_class(config['models'][model_name], orig_model_image_size=orig_model_image_size)
+    
+    model.batch_size = int(config['batch_size'])
+
+    logging.info('Segmenting Image...')
+    # SEGMENT THE MRI
+    seg = model.generate_mask(volume)
+
+    # convert seg to sitk format for downstream processing
+    sitk_seg = seg['all'].to_sitk(image_orientation='sagittal')
+    
+    return sitk_seg
 
 def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
-    print('Loading Inputs and Configurations...')
-        
-    print('Path to image analyzing:', path_image)
+    logging.info('Loading Inputs and Configurations...')
+    logging.info(f'Path to image analyzing: {path_image}')
 
-
+    # Validate input files exist
+    if not os.path.exists(path_image):
+        raise FileNotFoundError(f"Input image not found: {path_image}")
+    if not os.path.exists(path_config):
+        raise FileNotFoundError(f"Config file not found: {path_config}")
 
     # READ IN CONFIGURATION STUFF
     with open(path_config) as f:
@@ -77,7 +150,7 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
             dict_regions[tissue][int(region_num)] = region_name
 
 
-    print('Loading Image...')
+    logging.info('Loading Image...')
     # figure out if the image is dicom, or nifti, or nrrd & load / get filename
     # as appropriate
     if os.path.isdir(path_image):
@@ -104,59 +177,15 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
     else:
         raise ValueError('Image format not supported.')
 
-
-    print('Loading Model...')
-    # load the appropriate segmentation model & its weights
-    # set the actual model class being used
-    if model_name == 'staple':
-        print('Using Staple Model')
-        model = StanfordQDessBoneUNet2DSTAPLE(
-            config['models']['goyal_sagittal'],
-            config['models']['goyal_coronal'],
-            config['models']['goyal_axial']
-        )
-    else:
-        orig_model_image_size = (512,512)
-        if 'cube' in model_name:
-            print('Using Cube Model')
-            model_class = StanfordCubeBoneUNet2D
-        elif model_name == 'goyal_sagittal':
-            print('Using Goyal Sagittal Model')
-            model_class = StanfordQDessBoneUNet2DSagittal
-            orig_model_image_size = None
-        elif model_name == 'goyal_coronal':
-            print('Using Goyal Coronal Model')
-            model_class = StanfordQDessBoneUNet2DCoronal
-            orig_model_image_size = None
-        elif model_name == 'goyal_axial':
-            print('Using Goyal Axial Model')
-            model_class = StanfordQDessBoneUNet2DAxial
-            orig_model_image_size = None
-        
-        else:
-            model_class = StanfordQDessBoneUNet2D
-        # load the model. 
-        print(f'Loading {model_name} model, orig_model_image_size: {orig_model_image_size}')
-        model = model_class(config['models'][model_name], orig_model_image_size=orig_model_image_size)
+    # Perform segmentation
+    sitk_seg = segment_image_dosma(volume, model_name, config)
     
-    model.batch_size = int(config['batch_size'])
-
-
-    print('Segmenting Image...')
-    # SEGMENT THE MRI
-    seg = model.generate_mask(volume)
-
-    # save the segmentation as nifti
-    nw = dm.NiftiWriter()
-    nw.save(seg['all'], os.path.join(path_save, filename_save + '_all-labels.nii.gz'))
-
-    # convert seg to sitk format for pymskt processing
-    sitk_seg = seg['all'].to_sitk(image_orientation='sagittal')
-    # save the segmentation as nrrd
+    # Save segmentation files
+    sitk.WriteImage(sitk_seg, os.path.join(path_save, filename_save + '_all-labels.nii.gz'), useCompression=True)
     sitk.WriteImage(sitk_seg, os.path.join(path_save, filename_save + '_all-labels.nrrd'), useCompression=True)
 
 
-    print('Creating Meshes and Computing Cartilage Thickness...')
+    logging.info('Creating Meshes and Computing Cartilage Thickness...')
     # break segmentation into subregions
     sitk_seg_subregions = mskt.image.cartilage_processing.get_knee_segmentation_with_femur_subregions(
         sitk_seg,
@@ -234,7 +263,7 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
             cart_mesh.save_mesh(os.path.join(path_save, f'{bone_name}_cart_{cart_idx}_mesh.vtk'))
 
 
-    print('Computing T2 Maps and Metrics...')
+    logging.info('Computing T2 Maps and Metrics...')
     # need seg_array for preprocessing related to NSM fitting. 
     seg_array = sitk.GetArrayFromImage(sitk_seg_subregions)
     
@@ -263,8 +292,6 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
             t2_array[t2_array >= T2_MAX_VALID] = np.nan
             t2_array[t2_array <= T2_MIN_VALID] = np.nan
             
-            
-
             # compute T2 metrics for each region & store in results dictionary
             for cart_idx, cart_region in dict_regions['cart'].items():
                 if cart_idx in seg_array:
@@ -313,9 +340,9 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
                 'NOTE: These are private tags and may have been removed ' +
                 'in the DICOM anonymization process.')
     else:
-        print('Not a qdess image. Skipping T2 computation.')
+        logging.info('Not a qdess image. Skipping T2 computation.')
 
-    print('Saving Results...')
+    logging.info('Saving Results...')
     # SAVE THICKNESS & T2 METRICS
     # save as csv
     df = pd.DataFrame([dict_results])
@@ -325,7 +352,7 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
     with open(os.path.join(path_save, f'{filename_save}_results.json'), 'w') as f:
         json.dump(dict_results, f, indent=4)
     
-    print('Saving Meshes for NSM Fitting...')
+    logging.info('Saving Meshes for NSM Fitting...')
     
     # look at the config  says to analyze nsm bone or bone and cartilage... 
     if config['perform_bone_only_nsm'] or config['perform_bone_and_cart_nsm']:
@@ -358,11 +385,12 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
         fem_cart.save_mesh(os.path.join(path_save, 'fem_cart_mesh_NSM_orig.vtk'))
 
     # Memory cleanup
-    print('Cleaning up memory...')
+    logging.info('Cleaning up memory...')
     del model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
+    # Sleep to allow CUDA to fully release GPU memory before next process
     time.sleep(5)
 
 if __name__ == "__main__":
