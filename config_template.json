@@ -2,7 +2,7 @@
     "perform_bone_only_nsm": true,
     "perform_bone_and_cart_nsm": false,
     "clip_femur_top": true,
-    "default_seg_model": "goyal_sagittal",
+    "default_seg_model": "nnunet_knee",
     "batch_size": 32,
     "models": {
         "acl_qdess_bone_july_2024": "/path/to/DOSMA_WEIGHTS/Goyal_Bone_Cart_July_2024_best_model.h5",

@@ -3,7 +3,10 @@
 **/DOSMA_WEIGHTS
 **/nsm
 **/pymskt
-**/DEPENDENCIES
+DEPENDENCIES/*
+!DEPENDENCIES/nnunet_knee_inference
+
+test/
 
 dosma_knee_seg_orig.py
 config.json

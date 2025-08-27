@@ -4,14 +4,15 @@
     - DOSMA (bone_seg branch)
     - pymskt
     - NSM
+    - nnunetv2
 ```
 # create environment
 conda create -n knee_pipeline python=3.8
 conda activate knee_pipeline
 
 # install non-python dependcies
-conda install anaconda::cmake
-conda install conda-forge::lit
+conda install -c conda-forge cmake
+conda install -c conda-forge lit
 
 # make directory to download and install dependencies
 mkdir DEPENDENCIES
@@ -20,7 +21,8 @@ cd DEPENDENCIES
 # Install NSM 
 git clone https://github.com/gattia/nsm
 cd nsm
-conda install pytorch==2.0.0 torchvision==0.15.0 torchaudio==2.0.0 pytorch-cuda=11.7 -c pytorch -c nvidia
+conda install pytorch torchvision torchaudio pytorch-cuda -c pytorch -c nvidia
+
 make requirements
 pip install .
 
@@ -36,6 +38,11 @@ pip install '.[ai]'
 
 # Install pymskt - this is superfluous becuase its already included in NSM
 pip install mskt
+
+# Install nnU-Net inference
+git submodule update --init --recursive
+cd DEPENDENCIES/nnunet_knee_inference
+# Follow install instructions in that repo's README for nnU-Net setup
 
 # IF HAVING ISSUES WITH TF, INSTALL VERSION 2.11 (pip install tensorflow==2.11)
 ```
@@ -112,13 +119,29 @@ To run script:
 python /path/to/dosma_knee_seg.py <path_to_qdess_image> <path_to_save_results> [model_name]
 ```
 
+**Examples:**
+```bash
+# Use default DOSMA model
+python dosma_knee_seg.py /path/to/image.nii.gz /path/to/results/
+
+# Use specific DOSMA model  
+python dosma_knee_seg.py /path/to/image.nii.gz /path/to/results/ goyal_sagittal
+
+# Use nnU-Net segmentation
+python dosma_knee_seg.py /path/to/image.nii.gz /path/to/results/ nnunet_knee
+```
+
 **Input Format Support:**
 - DICOM directories (for full T2 analysis)
 - NIfTI files (`.nii`, `.nii.gz`) - RSS/preprocessed images
 - NRRD files (`.nrrd`)
 
 **Model Selection:**
-The pipeline uses `goyal_sagittal` as the default segmentation model, which provides a good balance of speed and accuracy for sagittal knee MRI images. If no model is specified, this will be used automatically.
+The pipeline supports multiple segmentation methods:
+- **DOSMA models**: `goyal_sagittal` (default), `goyal_coronal`, `goyal_axial`, `staple`
+- **nnU-Net models**: `nnunet_knee` - high-performance deep learning segmentation
+
+The pipeline automatically detects the segmentation method based on the model name prefix. nnU-Net models provide state-of-the-art performance but require additional setup (see installation above).
 
 **T2 Analysis Requirements:**
 - T2 mapping only works with DICOM input that contains GL (Gradient Linearity) and TG (Transmit Gain) private tags

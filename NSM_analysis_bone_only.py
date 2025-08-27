@@ -138,8 +138,17 @@ if isinstance(icp_transform, vtk.vtkIterativeClosestPointTransform):
     icp_transform = get_linear_transform_matrix(icp_transform)
 elif isinstance(icp_transform, np.ndarray):
     pass
+elif isinstance(icp_transform, vtk.vtkTransform):
+    icp_transform = get_linear_transform_matrix(icp_transform)
+elif isinstance(icp_transform, vtk.vtkMatrix4x4):
+    # Convert vtkMatrix4x4 to numpy array
+    matrix = np.zeros((4, 4))
+    for i in range(4):
+        for j in range(4):
+            matrix[i, j] = icp_transform.GetElement(i, j)
+    icp_transform = matrix
 else:
-    raise ValueError('icp_transform not a valid type')
+    raise ValueError(f'icp_transform not a valid type: {type(icp_transform)}')
 
 # then save the latent, registration params used to fit the model,
 # and the ASSD of the reconstructed meshes vs. the original meshes.  

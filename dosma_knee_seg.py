@@ -25,7 +25,6 @@ def main(config_path, path_image, path_save, path_seg_script):
         config = json.load(f)
     
     model_name = sys.argv[3] if len(sys.argv) > 3 else config.get('default_seg_model', 'goyal_sagittal')
-    # model_name = 'staple'
 
     print(f"Running Segmentation Pipeline with Model: {model_name}")
     

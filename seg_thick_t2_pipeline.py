@@ -23,6 +23,7 @@ import gc
 import time
 import logging
 from utils import clip_femur_top
+from dosma.models.seg_model import fill_holes, get_connected_segments
 
 # Setup simple logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -125,6 +126,73 @@ def segment_image_dosma(volume, model_name, config):
     
     return sitk_seg
 
+def segment_image_nnunet(volume, model_name, config):
+    """
+    Segment image using nnU-Net models.
+    
+    Args:
+        volume: Medical volume to segment  
+        model_name: Name of nnunet model (currently unused - uses default model)
+        config: Configuration dictionary (currently unused)
+        
+    Returns:
+        sitk.Image: segmentation image in SimpleITK format
+    """
+    # Add nnunet inference to path
+    import sys
+    import tempfile
+    nnunet_path = os.path.join(os.path.dirname(__file__), 'DEPENDENCIES', 'nnunet_knee_inference')
+    if nnunet_path not in sys.path:
+        sys.path.append(nnunet_path)
+    
+    from scripts.inference import KneeSegmentationInference
+    
+    logging.info('Loading nnU-Net model (using default model path)')
+    inference = KneeSegmentationInference()  # Uses default model path
+    
+    # Save volume to temporary file for nnunet inference
+    with tempfile.NamedTemporaryFile(suffix='.nii.gz', delete=False) as temp_file:
+        temp_input_path = temp_file.name
+        
+    try:
+        # Convert DOSMA volume to SimpleITK and save temporarily
+        sitk_input = volume.to_sitk(image_orientation='sagittal')
+        sitk.WriteImage(sitk_input, temp_input_path)
+        
+        logging.info('Running nnU-Net segmentation...')
+        # Run nnunet inference
+        sitk_seg = inference.predict(temp_input_path)
+        
+        # Apply DOSMA post-processing
+        logging.info('Applying post-processing (connected components and hole filling)...')
+        
+        # Convert to numpy array for post-processing
+        seg_array = sitk.GetArrayFromImage(sitk_seg)
+        
+        # Get connected segments (largest connected component for each label)
+        seg_array = get_connected_segments(seg_array)
+        
+        # Fill holes in bone segments (indices 7=femur, 8=tibia, 9=patella)
+        bone_indices = [7, 8, 9]
+        for bone_idx in bone_indices:
+            if bone_idx in seg_array:
+                mask_ = fill_holes(seg_array, label_idx=bone_idx)
+                seg_array[mask_ == 1] = bone_idx
+        
+        # Convert back to uint8 and SimpleITK format
+        seg_array = seg_array.astype(np.uint8)
+        
+        # Create new SimpleITK image with post-processed array
+        sitk_seg_processed = sitk.GetImageFromArray(seg_array)
+        sitk_seg_processed.CopyInformation(sitk_seg)
+        
+        return sitk_seg_processed
+        
+    finally:
+        # Clean up temp file
+        if os.path.exists(temp_input_path):
+            os.unlink(temp_input_path)
+
 def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
     logging.info('Loading Inputs and Configurations...')
     logging.info(f'Path to image analyzing: {path_image}')
@@ -134,6 +202,11 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
         raise FileNotFoundError(f"Input image not found: {path_image}")
     if not os.path.exists(path_config):
         raise FileNotFoundError(f"Config file not found: {path_config}")
+    
+    # Create output directory if it doesn't exist
+    if not os.path.exists(path_save):
+        os.makedirs(path_save)
+        logging.info(f'Created output directory: {path_save}')
 
     # READ IN CONFIGURATION STUFF
     with open(path_config) as f:
@@ -177,8 +250,13 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
     else:
         raise ValueError('Image format not supported.')
 
-    # Perform segmentation
-    sitk_seg = segment_image_dosma(volume, model_name, config)
+    # Perform segmentation - route to appropriate method
+    if model_name.startswith('nnunet'):
+        logging.info('Using nnU-Net segmentation method')
+        sitk_seg = segment_image_nnunet(volume, model_name, config)
+    else:
+        logging.info('Using DOSMA segmentation method')
+        sitk_seg = segment_image_dosma(volume, model_name, config)
     
     # Save segmentation files
     sitk.WriteImage(sitk_seg, os.path.join(path_save, filename_save + '_all-labels.nii.gz'), useCompression=True)
@@ -386,7 +464,6 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
 
     # Memory cleanup
     logging.info('Cleaning up memory...')
-    del model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()

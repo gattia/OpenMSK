@@ -1,0 +1,3 @@
+[submodule "DEPENDENCIES/nnunet_knee_inference"]
+	path = DEPENDENCIES/nnunet_knee_inference
+	url = https://github.com/gattia/nnunet_knee_inference.git
