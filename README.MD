@@ -40,6 +40,7 @@ pip install '.[ai]'
 pip install mskt
 
 # Install nnU-Net inference
+# For new clones or after pulling submodule changes:
 git submodule update --init --recursive
 cd DEPENDENCIES/nnunet_knee_inference
 # Follow install instructions in that repo's README for nnU-Net setup
