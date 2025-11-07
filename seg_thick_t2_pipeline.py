@@ -147,8 +147,29 @@ def segment_image_nnunet(volume, model_name, config):
     
     from scripts.inference import KneeSegmentationInference
     
-    logging.info('Loading nnU-Net model (using default model path)')
-    inference = KneeSegmentationInference()  # Uses default model path
+    # Strict validation - fail if config is wrong
+    if not config:
+        raise ValueError("Config dictionary is required but was None or empty")
+    
+    if 'nnunet' not in config:
+        raise ValueError("Config must contain 'nnunet' section. Check your config file.")
+    
+    if 'type' not in config['nnunet']:
+        raise ValueError("Config['nnunet'] must contain 'type' key. Valid values: 'cascade' or 'fullres'")
+    
+    nnunet_type = config['nnunet']['type']
+    
+    # Validate the type - fail if invalid
+    if nnunet_type not in ['cascade', 'fullres']:
+        raise ValueError(
+            f"Invalid nnunet type '{nnunet_type}'. Must be 'cascade' or 'fullres'. "
+            f"Update your config file."
+        )
+    
+    logging.info(f'Loading nnU-Net model (type: {nnunet_type})')
+    
+    # Pass as keyword argument 'config=', not positional!
+    inference = KneeSegmentationInference(config=nnunet_type)
     
     # Save volume to temporary file for nnunet inference
     with tempfile.NamedTemporaryFile(suffix='.nii.gz', delete=False) as temp_file:

@@ -145,12 +145,26 @@ cart_mesh.save_mesh(os.path.join(loc_save_recons, f'NSM_recon_{os.path.basename(
 # SAVE THE GENERAL PARAMETERS:
 # first, convert the icp_transform to a numpy array if it is a vtk object
 icp_transform = mesh_result['icp_transform']
+
 if isinstance(icp_transform, vtk.vtkIterativeClosestPointTransform):
     icp_transform = get_linear_transform_matrix(icp_transform)
 elif isinstance(icp_transform, np.ndarray):
     pass
+elif isinstance(icp_transform, vtk.vtkTransform):
+    icp_transform = get_linear_transform_matrix(icp_transform)
+elif isinstance(icp_transform, vtk.vtkMatrix4x4):
+    # Convert vtkMatrix4x4 to numpy array
+    matrix = np.zeros((4, 4))
+    for i in range(4):
+        for j in range(4):
+            matrix[i, j] = icp_transform.GetElement(i, j)
+    icp_transform = matrix
+elif icp_transform is None:
+    # Handle case where icp_transform is None
+    print("WARNING: icp_transform is None, using identity matrix")
+    icp_transform = np.eye(4)
 else:
-    raise ValueError('icp_transform not a valid type')
+    raise ValueError(f'icp_transform not a valid type: {type(icp_transform)}')
 
 # then save the latent, registration params used to fit the model,
 # and the ASSD of the reconstructed meshes vs. the original meshes.  

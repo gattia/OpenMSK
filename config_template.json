@@ -10,6 +10,10 @@
         "goyal_coronal": "/path/to/DOSMA_WEIGHTS/coronal_best_model.h5",
         "goyal_axial": "/path/to/DOSMA_WEIGHTS/axial_best_model.h5"
     },
+    "nnunet": {
+        "type": "fullres",
+        "model_name": "Dataset500_KneeMRI"
+    },
     "nsm": {
         "path_model_config": "/path/to/NSM_MODELS/647_nsm_femur_cartilage_v0.0.1/model_config.json",
         "path_model_state": "/path/to/NSM_MODELS/647_nsm_femur_cartilage_v0.0.1/model/2000.pth"
