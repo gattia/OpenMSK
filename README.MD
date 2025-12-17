@@ -48,6 +48,66 @@ cd DEPENDENCIES/nnunet_knee_inference
 # IF HAVING ISSUES WITH TF, INSTALL VERSION 2.11 (pip install tensorflow==2.11)
 ```
 
+### Known Compatibility Issues: TensorFlow/Keras vs nnU-Net
+
+This environment requires both **TensorFlow/Keras** (for DOSMA segmentation models) and **nnU-Net** (for alternative segmentation). These packages have conflicting NumPy version requirements:
+
+| Package | NumPy Requirement | Notes |
+|---------|-------------------|-------|
+| TensorFlow 2.11 | < 2.0 (compiled for NumPy 1.x) | Required for DOSMA `.h5` model loading |
+| Keras < 3 | < 2.0 | Needed to avoid `groups` argument errors in Conv2DTranspose |
+| nnunetv2 | >= 1.24 | Modern deep learning segmentation |
+| scikit-image | >= 1.24 | Image processing utilities |
+| PyTorch 2.x | 1.x or 2.x | Supports both versions |
+
+#### Symptoms of NumPy Incompatibility
+
+If you see errors like:
+```
+A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x
+AttributeError: _ARRAY_API not found
+ImportError: numpy.core._multiarray_umath failed to import
+```
+
+This means your NumPy version is too new (2.x) for TensorFlow 2.11.
+
+#### Symptoms of Keras 2/3 Incompatibility
+
+If you see errors like:
+```
+ValueError: Unrecognized keyword arguments passed to Conv2DTranspose: {'groups': 1}
+```
+
+This means your Keras version is too new (Keras 3) for the saved `.h5` model weights.
+
+#### Recommended Solution
+
+Use **NumPy 1.24.x** as a compromise that satisfies most packages:
+
+```bash
+conda activate kneepipeline_310
+
+# Install compatible TensorFlow and Keras versions
+pip install tensorflow==2.11
+pip install "keras<3"
+
+# Install NumPy 1.24.x (works with TF 2.11 and satisfies nnunetv2/scikit-image)
+pip install numpy==1.24.3
+
+# Verify all packages import correctly
+python -c "import numpy; import torch; import tensorflow; print(f'NumPy: {numpy.__version__}'); print(f'PyTorch: {torch.__version__}'); print(f'TensorFlow: {tensorflow.__version__}')"
+```
+
+**Note:** You may still see pip warnings about `blosc2` requiring `numpy>=1.26`, but this typically doesn't affect functionality.
+
+#### TensorRT Warnings (Safe to Ignore)
+
+Warnings about missing `libnvinfer.so.7` are related to optional TensorRT GPU optimization and do not affect model inference:
+```
+Could not load dynamic library 'libnvinfer.so.7'
+TF-TRT Warning: Cannot dlopen some TensorRT libraries
+```
+
 ### Download models from huggingface
 
 Download NSM HF Models using instructions on: https://github.com/gattia/ShapeMedKnee/
