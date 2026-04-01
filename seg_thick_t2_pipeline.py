@@ -248,12 +248,24 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
     # figure out if the image is dicom, or nifti, or nrrd & load / get filename
     # as appropriate
     if os.path.isdir(path_image):
-        # read in dicom image using DOSMA
+        # Try loading as qDESS first (enables T2 mapping if successful)
         try:
-            qdess = QDess.from_dicom(path_image)
-        except KeyError:
-            qdess = QDess.from_dicom(path_image, group_by='EchoTime')
-        volume = qdess.calc_rss()
+            try:
+                qdess = QDess.from_dicom(path_image)
+            except KeyError:
+                qdess = QDess.from_dicom(path_image, group_by='EchoTime')
+            volume = qdess.calc_rss()
+        except (ValueError, TypeError):
+            # Not a qDESS scan — fall back to generic DICOM loading
+            logging.info('Not a qDESS scan, loading as generic DICOM via SimpleITK...')
+            qdess = None
+            reader = sitk.ImageSeriesReader()
+            dicom_names = reader.GetGDCMSeriesFileNames(path_image)
+            if not dicom_names:
+                raise ValueError(f"No DICOM files found in directory: {path_image}")
+            reader.SetFileNames(dicom_names)
+            image = reader.Execute()
+            volume = MedicalVolume.from_sitk(image)
         filename_save = os.path.basename(path_image)
     elif path_image.endswith(('nii', 'nii.gz')):
         # read in nifti using DOSMA
@@ -262,12 +274,14 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
         nr = dm.NiftiReader()
         volume = nr.load(path_image)
         filename_save = os.path.basename(path_image).split('.nii')[0]
-    elif path_image.endswith('nrrd'):
+    elif path_image.endswith(('nrrd', 'dcm')):
         # read in using SimpleITK, then convert to DOSMA
+        # Works for NRRD files and single 3D DICOM files (enhanced multi-frame)
         qdess = None
         image = sitk.ReadImage(path_image)
         volume = MedicalVolume.from_sitk(image)
-        filename_save = os.path.basename(path_image).split('.nrrd')[0]
+        extension = '.nrrd' if path_image.endswith('nrrd') else '.dcm'
+        filename_save = os.path.basename(path_image).replace(extension, '')
     else:
         raise ValueError('Image format not supported.')
 
