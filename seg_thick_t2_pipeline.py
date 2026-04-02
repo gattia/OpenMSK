@@ -35,6 +35,41 @@ DEPTH_THRESHOLD = 0.5
 DEEP_OFFSET = 100
 SUPERFICIAL_OFFSET = 200
 
+class StepTracker:
+    """Track pipeline step completion. Written to disk so the web worker can read it."""
+
+    STEPS = [
+        'segmentation',
+        'mesh_and_thickness',
+        't2_mapping',
+        'nsm_preparation',
+    ]
+
+    def __init__(self, path_save):
+        self.path = os.path.join(path_save, '_step_log.json')
+        self.steps = {}
+
+    def start(self, name):
+        self.steps[name] = 'running'
+        self._write()
+
+    def complete(self, name):
+        self.steps[name] = 'complete'
+        self._write()
+
+    def skip(self, name, reason=''):
+        self.steps[name] = 'skipped'
+        self._write()
+
+    def fail(self, name):
+        self.steps[name] = 'failed'
+        self._write()
+
+    def _write(self):
+        with open(self.path, 'w') as f:
+            json.dump({'steps': self.steps}, f, indent=2)
+
+
 def determine_knee_side(seg_array, sitk_seg_subregions):
     """Determine if knee is left or right based on cartilage positions."""
     # figure out if right or left leg. Use the medial/lateral tibial cartilage to determine side
@@ -223,11 +258,13 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
         raise FileNotFoundError(f"Input image not found: {path_image}")
     if not os.path.exists(path_config):
         raise FileNotFoundError(f"Config file not found: {path_config}")
-    
+
     # Create output directory if it doesn't exist
     if not os.path.exists(path_save):
         os.makedirs(path_save)
         logging.info(f'Created output directory: {path_save}')
+
+    tracker = StepTracker(path_save)
 
     # READ IN CONFIGURATION STUFF
     with open(path_config) as f:
@@ -285,217 +322,226 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
     else:
         raise ValueError('Image format not supported.')
 
-    # Perform segmentation - route to appropriate method
+    # ── Phase 1: Segmentation (critical — fail hard if this doesn't work) ──
+    tracker.start('segmentation')
+
     if model_name.startswith('nnunet'):
         logging.info('Using nnU-Net segmentation method')
         sitk_seg = segment_image_nnunet(volume, model_name, config)
     else:
         logging.info('Using DOSMA segmentation method')
         sitk_seg = segment_image_dosma(volume, model_name, config)
-    
+
     # Save segmentation files
     sitk.WriteImage(sitk_seg, os.path.join(path_save, filename_save + '_all-labels.nii.gz'), useCompression=True)
     sitk.WriteImage(sitk_seg, os.path.join(path_save, filename_save + '_all-labels.nrrd'), useCompression=True)
 
+    tracker.complete('segmentation')
 
-    logging.info('Creating Meshes and Computing Cartilage Thickness...')
-    # break segmentation into subregions
-    sitk_seg_subregions = mskt.image.cartilage_processing.get_knee_segmentation_with_femur_subregions(
-        sitk_seg,
-        fem_cart_label_idx=2,
-        wb_region_percent_dist=0.6,
-        femur_label=7,
-        med_tibia_label=3,
-        lat_tibia_label=4,
-        ant_femur_mask=11,
-        med_wb_femur_mask=12,
-        lat_wb_femur_mask=13,
-        med_post_femur_mask=14,
-        lat_post_femur_mask=15,
-        verify_med_lat_tib_cart=True,
-        tibia_label=8,
-        ml_axis=0,
-    )
-    
-    # save the subregions to disk
-    sitk.WriteImage(sitk_seg_subregions, os.path.join(path_save, f'{filename_save}_subregions-labels.nrrd'), useCompression=True)
-    sitk.WriteImage(sitk_seg_subregions, os.path.join(path_save, f'{filename_save}_subregions-labels.nii.gz'), useCompression=True)
-
-    # create 3D surfaces w/ cartilage thickness & compute thickness metrics
+    # Variables that downstream phases may or may not populate
+    sitk_seg_subregions = None
     dict_results = {}
-    for bone_name, bone_config in dict_bones.items():
-        # create bone mesh and crop as appropriate
-        bone_mesh = mskt.mesh.BoneMesh(
-            seg_image=sitk_seg,
-            label_idx=bone_config['tissue_idx'],
-            list_cartilage_labels=bone_config['list_cart_labels'],
-            bone=bone_name,
-            crop_percent=bone_config['crop_percent'],
+    seg_array = None
+
+    # ── Phase 2: Mesh generation + cartilage thickness (best effort) ──
+    tracker.start('mesh_and_thickness')
+    try:
+        logging.info('Creating Meshes and Computing Cartilage Thickness...')
+        # break segmentation into subregions
+        sitk_seg_subregions = mskt.image.cartilage_processing.get_knee_segmentation_with_femur_subregions(
+            sitk_seg,
+            fem_cart_label_idx=2,
+            wb_region_percent_dist=0.6,
+            femur_label=7,
+            med_tibia_label=3,
+            lat_tibia_label=4,
+            ant_femur_mask=11,
+            med_wb_femur_mask=12,
+            lat_wb_femur_mask=13,
+            med_post_femur_mask=14,
+            lat_post_femur_mask=15,
+            verify_med_lat_tib_cart=True,
+            tibia_label=8,
+            ml_axis=0,
         )
-        bone_mesh.create_mesh(smooth_image_var=0.5)
-        bone_mesh.resample_surface(clusters=bone_config['n_points'])
-        
-        # fix bone mesh
-        bone_mesh.fix_mesh()
-        
-        # compute cartilage thickness metrics - on surfaces
-        bone_mesh.calc_cartilage_thickness(image_smooth_var_cart=0.3125)
-        bone_mesh.seg_image = sitk_seg_subregions
-        
-        # fix cartilage surface
-        for cart_mesh in bone_mesh.list_cartilage_meshes:
-            cart_mesh.fix_mesh()
-        
-        # get labels to compute thickness metrics
-        if bone_name == 'femur':
-            cart_labels = [11, 12, 13, 14, 15]
-            bone_mesh.list_cartilage_labels=cart_labels
-        else:
-            cart_labels = bone_config['list_cart_labels']
-        # assign labels to bone surface
-        bone_mesh.assign_cartilage_regions()
-        
-        # store this mesh in dict for later use
-        dict_bones[bone_name]['mesh'] = bone_mesh
-        
-        # get thickness and region for each bone vertex
-        thickness = np.array(bone_mesh.get_scalar('thickness (mm)'))
-        regions = np.array(bone_mesh.get_scalar('labels'))
-        
-        # for each region, compute thicknes statics. 
-        for region in cart_labels:
-            dict_results[f"{dict_regions['cart'][region]}_mm_mean"] = np.nanmean(thickness[regions == region])
-            dict_results[f"{dict_regions['cart'][region]}_mm_std"] = np.nanstd(thickness[regions == region])
-            dict_results[f"{dict_regions['cart'][region]}_mm_median"] = np.nanmedian(thickness[regions == region])
-        
-        
-        # save the bone and cartilage meshes. 
-        bone_mesh.save_mesh(os.path.join(path_save, f'{bone_name}_mesh.vtk'))
-        # iterate over the cartilage meshes associated with the bone_mesh and save: 
-        for cart_idx, cart_mesh in enumerate(bone_mesh.list_cartilage_meshes):
-            cart_mesh.save_mesh(os.path.join(path_save, f'{bone_name}_cart_{cart_idx}_mesh.vtk'))
 
+        # save the subregions to disk
+        sitk.WriteImage(sitk_seg_subregions, os.path.join(path_save, f'{filename_save}_subregions-labels.nrrd'), useCompression=True)
+        sitk.WriteImage(sitk_seg_subregions, os.path.join(path_save, f'{filename_save}_subregions-labels.nii.gz'), useCompression=True)
 
-    logging.info('Computing T2 Maps and Metrics...')
-    # need seg_array for preprocessing related to NSM fitting. 
-    seg_array = sitk.GetArrayFromImage(sitk_seg_subregions)
-    
-    if (qdess is not None):
-        include_required_tags = (
-            (qdess.get_metadata(qdess.__GL_AREA_TAG__, None) is not None)
-            and (qdess.get_metadata(qdess.__TG_TAG__, None) is not None)
-        )
-        if include_required_tags:
-            # See if gl and tg private tags are present, if not, 32Askip T2 computation
-            # create T2 map and clip values
-            cart = FemoralCartilage()
-            t2map = qdess.generate_t2_map(cart, suppress_fat=False, suppress_fluid=False)
-
-            # convert to sitk for mean T2 computation
-            sitk_t2map = t2map.volumetric_map.to_sitk(image_orientation='sagittal')
-            
-            # save the t2 map
-            sitk.WriteImage(sitk_t2map, os.path.join(path_save, f'{filename_save}_t2map.nii.gz'), useCompression=False)
-            sitk.WriteImage(sitk_t2map, os.path.join(path_save, f'{filename_save}_t2map.nrrd'), useCompression=False)
-
-            seg_array = sitk.GetArrayFromImage(sitk_seg_subregions)
-
-            # get T2 as array and set values outside of expected/reasonable range to nan
-            t2_array = sitk.GetArrayFromImage(sitk_t2map)
-            t2_array[t2_array >= T2_MAX_VALID] = np.nan
-            t2_array[t2_array <= T2_MIN_VALID] = np.nan
-            
-            # compute T2 metrics for each region & store in results dictionary
-            for cart_idx, cart_region in dict_regions['cart'].items():
-                if cart_idx in seg_array:
-                    mean_t2 = np.nanmean(t2_array[seg_array == cart_idx])
-                    std_t2 = np.nanstd(t2_array[seg_array == cart_idx])
-                    median_t2 = np.nanmedian(t2_array[seg_array == cart_idx])
-                    dict_results[f'{cart_region}_t2_ms_mean'] = mean_t2
-                    dict_results[f'{cart_region}_t2_ms_std'] = std_t2
-                    dict_results[f'{cart_region}_t2_ms_median'] = median_t2
-            
-            # convert segmentation into simple depth dependent version of the segmentation.
-            for bone_name, bone_config in dict_bones.items():
-                bone_mesh = bone_config['mesh']
-                # update bone_mesh list_cartilage_labels to be the original ones
-                # this is only really needed for the femur, but we do it for all bones... just in case. 
-                bone_mesh.list_cartilage_labels = bone_config['list_cart_labels']
-                # assign the segmentation mask to be the original one.. 
-                bone_mesh.seg_image = sitk_seg
-                bone_new_seg, bone_rel_depth = bone_mesh.break_cartilage_into_superficial_deep(rel_depth_thresh=DEPTH_THRESHOLD, return_rel_depth=True, resample_cartilage_surface=10_000)
-                bone_config['bone_new_seg'] = bone_new_seg
-                bone_config['bone_rel_depth'] = bone_rel_depth
-            new_seg_combined = mskt.image.cartilage_processing.combine_depth_region_segs(
-                sitk_seg_subregions,
-                [x['bone_new_seg'] for x in dict_bones.values()],
+        # create 3D surfaces w/ cartilage thickness & compute thickness metrics
+        for bone_name, bone_config in dict_bones.items():
+            # create bone mesh and crop as appropriate
+            bone_mesh = mskt.mesh.BoneMesh(
+                seg_image=sitk_seg,
+                label_idx=bone_config['tissue_idx'],
+                list_cartilage_labels=bone_config['list_cart_labels'],
+                bone=bone_name,
+                crop_percent=bone_config['crop_percent'],
             )
-            
-            # save the depth dependent segmentation to disk 
-            sitk.WriteImage(new_seg_combined, os.path.join(path_save, f'{filename_save}_depth_seg.nrrd'), useCompression=True)
-            
-            # compute T2 metrics for each region & store in results dictionary
-            # store as superficial / deep T2 maps. 
-            seg_array_depth = sitk.GetArrayFromImage(new_seg_combined)
-            for cart_idx, cart_region in dict_regions['cart'].items():
-                for depth_idx, depth_name in [(DEEP_OFFSET, 'deep'), (SUPERFICIAL_OFFSET, 'superficial')]:
-                    cart_idx_depth = cart_idx + depth_idx
-                    if cart_idx_depth in seg_array_depth:
-                        mean_t2 = np.nanmean(t2_array[seg_array_depth == cart_idx_depth])
-                        std_t2 = np.nanstd(t2_array[seg_array_depth == cart_idx_depth])
-                        median_t2 = np.nanmedian(t2_array[seg_array_depth == cart_idx_depth])
-                        dict_results[f'{cart_region}_{depth_name}_t2_ms_mean'] = mean_t2
-                        dict_results[f'{cart_region}_{depth_name}_t2_ms_std'] = std_t2
-                        dict_results[f'{cart_region}_{depth_name}_t2_ms_median'] = median_t2
-        else:
-            warnings.warn(
-                'GL and TG tags not present. Skipping T2 computation. '+
-                'NOTE: These are private tags and may have been removed ' +
-                'in the DICOM anonymization process.')
-    else:
-        logging.info('Not a qdess image. Skipping T2 computation.')
+            bone_mesh.create_mesh(smooth_image_var=0.5)
+            bone_mesh.resample_surface(clusters=bone_config['n_points'])
 
+            # fix bone mesh
+            bone_mesh.fix_mesh()
+
+            # compute cartilage thickness metrics - on surfaces
+            bone_mesh.calc_cartilage_thickness(image_smooth_var_cart=0.3125)
+            bone_mesh.seg_image = sitk_seg_subregions
+
+            # fix cartilage surface
+            for cart_mesh in bone_mesh.list_cartilage_meshes:
+                cart_mesh.fix_mesh()
+
+            # get labels to compute thickness metrics
+            if bone_name == 'femur':
+                cart_labels = [11, 12, 13, 14, 15]
+                bone_mesh.list_cartilage_labels=cart_labels
+            else:
+                cart_labels = bone_config['list_cart_labels']
+            # assign labels to bone surface
+            bone_mesh.assign_cartilage_regions()
+
+            # store this mesh in dict for later use
+            dict_bones[bone_name]['mesh'] = bone_mesh
+
+            # get thickness and region for each bone vertex
+            thickness = np.array(bone_mesh.get_scalar('thickness (mm)'))
+            regions = np.array(bone_mesh.get_scalar('labels'))
+
+            # for each region, compute thickness statistics
+            for region in cart_labels:
+                dict_results[f"{dict_regions['cart'][region]}_mm_mean"] = np.nanmean(thickness[regions == region])
+                dict_results[f"{dict_regions['cart'][region]}_mm_std"] = np.nanstd(thickness[regions == region])
+                dict_results[f"{dict_regions['cart'][region]}_mm_median"] = np.nanmedian(thickness[regions == region])
+
+            # save the bone and cartilage meshes
+            bone_mesh.save_mesh(os.path.join(path_save, f'{bone_name}_mesh.vtk'))
+            for cart_idx, cart_mesh in enumerate(bone_mesh.list_cartilage_meshes):
+                cart_mesh.save_mesh(os.path.join(path_save, f'{bone_name}_cart_{cart_idx}_mesh.vtk'))
+
+        seg_array = sitk.GetArrayFromImage(sitk_seg_subregions)
+        tracker.complete('mesh_and_thickness')
+
+    except Exception:
+        logging.error('Mesh generation and cartilage thickness failed', exc_info=True)
+        tracker.fail('mesh_and_thickness')
+
+    # ── Phase 3: T2 mapping (best effort, needs qDESS data) ──
+    if qdess is None:
+        logging.info('Not a qDESS image. Skipping T2 computation.')
+        tracker.skip('t2_mapping')
+    elif sitk_seg_subregions is None:
+        logging.info('Skipping T2 — subregion segmentation not available.')
+        tracker.skip('t2_mapping')
+    else:
+        tracker.start('t2_mapping')
+        try:
+            logging.info('Computing T2 Maps and Metrics...')
+            include_required_tags = (
+                (qdess.get_metadata(qdess.__GL_AREA_TAG__, None) is not None)
+                and (qdess.get_metadata(qdess.__TG_TAG__, None) is not None)
+            )
+            if not include_required_tags:
+                logging.warning(
+                    'GL and TG tags not present. Skipping T2 computation. '
+                    'NOTE: These are private tags and may have been removed '
+                    'in the DICOM anonymization process.')
+                tracker.skip('t2_mapping')
+            else:
+                cart = FemoralCartilage()
+                t2map = qdess.generate_t2_map(cart, suppress_fat=False, suppress_fluid=False)
+                sitk_t2map = t2map.volumetric_map.to_sitk(image_orientation='sagittal')
+
+                sitk.WriteImage(sitk_t2map, os.path.join(path_save, f'{filename_save}_t2map.nii.gz'), useCompression=False)
+                sitk.WriteImage(sitk_t2map, os.path.join(path_save, f'{filename_save}_t2map.nrrd'), useCompression=False)
+
+                seg_array = sitk.GetArrayFromImage(sitk_seg_subregions)
+
+                t2_array = sitk.GetArrayFromImage(sitk_t2map)
+                t2_array[t2_array >= T2_MAX_VALID] = np.nan
+                t2_array[t2_array <= T2_MIN_VALID] = np.nan
+
+                for cart_idx, cart_region in dict_regions['cart'].items():
+                    if cart_idx in seg_array:
+                        dict_results[f'{cart_region}_t2_ms_mean'] = np.nanmean(t2_array[seg_array == cart_idx])
+                        dict_results[f'{cart_region}_t2_ms_std'] = np.nanstd(t2_array[seg_array == cart_idx])
+                        dict_results[f'{cart_region}_t2_ms_median'] = np.nanmedian(t2_array[seg_array == cart_idx])
+
+                # Depth-dependent T2 metrics
+                for bone_name, bone_config in dict_bones.items():
+                    bone_mesh = bone_config['mesh']
+                    bone_mesh.list_cartilage_labels = bone_config['list_cart_labels']
+                    bone_mesh.seg_image = sitk_seg
+                    bone_new_seg, bone_rel_depth = bone_mesh.break_cartilage_into_superficial_deep(
+                        rel_depth_thresh=DEPTH_THRESHOLD, return_rel_depth=True, resample_cartilage_surface=10_000)
+                    bone_config['bone_new_seg'] = bone_new_seg
+                    bone_config['bone_rel_depth'] = bone_rel_depth
+
+                new_seg_combined = mskt.image.cartilage_processing.combine_depth_region_segs(
+                    sitk_seg_subregions,
+                    [x['bone_new_seg'] for x in dict_bones.values()],
+                )
+                sitk.WriteImage(new_seg_combined, os.path.join(path_save, f'{filename_save}_depth_seg.nrrd'), useCompression=True)
+
+                seg_array_depth = sitk.GetArrayFromImage(new_seg_combined)
+                for cart_idx, cart_region in dict_regions['cart'].items():
+                    for depth_idx, depth_name in [(DEEP_OFFSET, 'deep'), (SUPERFICIAL_OFFSET, 'superficial')]:
+                        cart_idx_depth = cart_idx + depth_idx
+                        if cart_idx_depth in seg_array_depth:
+                            dict_results[f'{cart_region}_{depth_name}_t2_ms_mean'] = np.nanmean(t2_array[seg_array_depth == cart_idx_depth])
+                            dict_results[f'{cart_region}_{depth_name}_t2_ms_std'] = np.nanstd(t2_array[seg_array_depth == cart_idx_depth])
+                            dict_results[f'{cart_region}_{depth_name}_t2_ms_median'] = np.nanmedian(t2_array[seg_array_depth == cart_idx_depth])
+
+                tracker.complete('t2_mapping')
+
+        except Exception:
+            logging.error('T2 mapping failed', exc_info=True)
+            tracker.fail('t2_mapping')
+
+    # ── Save whatever results we have ──
     logging.info('Saving Results...')
-    # SAVE THICKNESS & T2 METRICS
-    # save as csv
     df = pd.DataFrame([dict_results])
     df.to_csv(os.path.join(path_save, f'{filename_save}_results.csv'), index=False)
-
-    # save as json
     with open(os.path.join(path_save, f'{filename_save}_results.json'), 'w') as f:
         json.dump(dict_results, f, indent=4)
-    
-    logging.info('Saving Meshes for NSM Fitting...')
-    
-    # look at the config  says to analyze nsm bone or bone and cartilage... 
-    if config['perform_bone_only_nsm'] or config['perform_bone_and_cart_nsm']:
-        # Determine knee side by comparing medial vs lateral tibial cartilage positions
-        # in world coordinates after applying rotation matrix
-        side = determine_knee_side(seg_array, sitk_seg_subregions)
 
-        # if side is left, flip the mesh to be a right knee
-        if side == 'left':
-            femur = dict_bones['femur']['mesh'] # in the future, copy this when BoneMesh has own copy method
-            # get the center of the mesh - so we can translate it back to have the same "center"
-            center = np.mean(femur.point_coords, axis=0)[0]
-            femur.point_coords = femur.point_coords * [-1, 1, 1]
-            # move the mesh back so the center is the same as before the flip along x-axis. 
-            femur.point_coords = femur.point_coords + [2*center, 0, 0]
-            # apply transformation to the cartilage mesh
-            fem_cart = femur.list_cartilage_meshes[0].copy()
-            fem_cart.point_coords = fem_cart.point_coords * [-1, 1, 1]
-            fem_cart.point_coords = fem_cart.point_coords + [2*center, 0, 0]
-        else:
-            femur = dict_bones['femur']['mesh']
-            fem_cart = femur.list_cartilage_meshes[0]
-        
-        if config['clip_femur_top']:
-            # this will clip the femur to be 70% of width, or 95% of height, whichever is larger.
-            femur = clip_femur_top(femur)
-   
-        # save the femur and cartilage meshes - this is in "NSM" format
-        femur.save_mesh(os.path.join(path_save, 'femur_mesh_NSM_orig.vtk'))
-        fem_cart.save_mesh(os.path.join(path_save, 'fem_cart_mesh_NSM_orig.vtk'))
+    # ── Phase 4: NSM mesh preparation (best effort, needs meshes) ──
+    has_meshes = 'mesh' in dict_bones.get('femur', {})
+    if not (config.get('perform_bone_only_nsm') or config.get('perform_bone_and_cart_nsm')):
+        tracker.skip('nsm_preparation')
+    elif not has_meshes or seg_array is None or sitk_seg_subregions is None:
+        logging.info('Skipping NSM — mesh generation did not complete.')
+        tracker.skip('nsm_preparation')
+    else:
+        tracker.start('nsm_preparation')
+        try:
+            logging.info('Saving Meshes for NSM Fitting...')
+            side = determine_knee_side(seg_array, sitk_seg_subregions)
+
+            if side == 'left':
+                femur = dict_bones['femur']['mesh']
+                center = np.mean(femur.point_coords, axis=0)[0]
+                femur.point_coords = femur.point_coords * [-1, 1, 1]
+                femur.point_coords = femur.point_coords + [2*center, 0, 0]
+                fem_cart = femur.list_cartilage_meshes[0].copy()
+                fem_cart.point_coords = fem_cart.point_coords * [-1, 1, 1]
+                fem_cart.point_coords = fem_cart.point_coords + [2*center, 0, 0]
+            else:
+                femur = dict_bones['femur']['mesh']
+                fem_cart = femur.list_cartilage_meshes[0]
+
+            if config['clip_femur_top']:
+                femur = clip_femur_top(femur)
+
+            femur.save_mesh(os.path.join(path_save, 'femur_mesh_NSM_orig.vtk'))
+            fem_cart.save_mesh(os.path.join(path_save, 'fem_cart_mesh_NSM_orig.vtk'))
+
+            tracker.complete('nsm_preparation')
+
+        except Exception:
+            logging.error('NSM mesh preparation failed', exc_info=True)
+            tracker.fail('nsm_preparation')
 
     # Memory cleanup
     logging.info('Cleaning up memory...')
