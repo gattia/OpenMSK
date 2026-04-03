@@ -81,6 +81,10 @@ model = model.cuda()
 model.eval()
 
 
+# Seed for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+
 # Reconstruct the meshes (bone/cartilage) using the NSM model
 mesh_result = reconstruct_mesh(
     path=path_meshes,

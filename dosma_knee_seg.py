@@ -82,8 +82,11 @@ if __name__ == "__main__":
     
     current_dir = os.path.dirname(os.path.abspath(__file__))
     
-    # get config path as config.json in current directory
-    config_path = os.path.join(current_dir, 'config.json')
+    # Use job-specific config if provided via env var, else fall back to local
+    config_path = os.environ.get(
+        'KNEEPIPELINE_CONFIG',
+        os.path.join(current_dir, 'config.json')
+    )
     
     # get path seg script   
     path_seg_script = os.path.join(current_dir, 'seg_thick_t2_pipeline.py')

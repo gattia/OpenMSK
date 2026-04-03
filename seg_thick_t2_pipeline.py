@@ -380,6 +380,9 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
                 crop_percent=bone_config['crop_percent'],
             )
             bone_mesh.create_mesh(smooth_image_var=0.5)
+            # Save raw mesh before pyacvd resampling for NSM fitting
+            if bone_name == 'femur':
+                dict_bones[bone_name]['raw_mesh'] = bone_mesh.copy()
             bone_mesh.resample_surface(clusters=bone_config['n_points'])
 
             # fix bone mesh
@@ -507,10 +510,11 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
         json.dump(dict_results, f, indent=4)
 
     # ── Phase 4: NSM mesh preparation (best effort, needs meshes) ──
-    has_meshes = 'mesh' in dict_bones.get('femur', {})
+    has_raw_mesh = 'raw_mesh' in dict_bones.get('femur', {})
+    has_processed_mesh = 'mesh' in dict_bones.get('femur', {})
     if not (config.get('perform_bone_only_nsm') or config.get('perform_bone_and_cart_nsm')):
         tracker.skip('nsm_preparation')
-    elif not has_meshes or seg_array is None or sitk_seg_subregions is None:
+    elif not has_raw_mesh or seg_array is None or sitk_seg_subregions is None:
         logging.info('Skipping NSM — mesh generation did not complete.')
         tracker.skip('nsm_preparation')
     else:
@@ -519,23 +523,29 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
             logging.info('Saving Meshes for NSM Fitting...')
             side = determine_knee_side(seg_array, sitk_seg_subregions)
 
+            # Use raw (pre-pyacvd) femur mesh for NSM fitting
+            femur = dict_bones['femur']['raw_mesh']
+            # Cartilage mesh from processed bone (not pyacvd-resampled)
+            if has_processed_mesh and dict_bones['femur']['mesh'].list_cartilage_meshes:
+                fem_cart = dict_bones['femur']['mesh'].list_cartilage_meshes[0]
+            else:
+                fem_cart = None
+
             if side == 'left':
-                femur = dict_bones['femur']['mesh']
                 center = np.mean(femur.point_coords, axis=0)[0]
                 femur.point_coords = femur.point_coords * [-1, 1, 1]
                 femur.point_coords = femur.point_coords + [2*center, 0, 0]
-                fem_cart = femur.list_cartilage_meshes[0].copy()
-                fem_cart.point_coords = fem_cart.point_coords * [-1, 1, 1]
-                fem_cart.point_coords = fem_cart.point_coords + [2*center, 0, 0]
-            else:
-                femur = dict_bones['femur']['mesh']
-                fem_cart = femur.list_cartilage_meshes[0]
+                if fem_cart is not None:
+                    fem_cart = fem_cart.copy()
+                    fem_cart.point_coords = fem_cart.point_coords * [-1, 1, 1]
+                    fem_cart.point_coords = fem_cart.point_coords + [2*center, 0, 0]
 
             if config['clip_femur_top']:
                 femur = clip_femur_top(femur)
 
             femur.save_mesh(os.path.join(path_save, 'femur_mesh_NSM_orig.vtk'))
-            fem_cart.save_mesh(os.path.join(path_save, 'fem_cart_mesh_NSM_orig.vtk'))
+            if fem_cart is not None:
+                fem_cart.save_mesh(os.path.join(path_save, 'fem_cart_mesh_NSM_orig.vtk'))
 
             tracker.complete('nsm_preparation')
 
@@ -557,7 +567,10 @@ if __name__ == "__main__":
     path_save = sys.argv[2]
     model_name = sys.argv[3] if len(sys.argv) > 3 else 'goyal_sagittal'
     
-    # set path to config as config.json in current directory
-    path_config = os.path.join(os.path.dirname(__file__), 'config.json')
+    # Use job-specific config if provided via env var, else fall back to local
+    path_config = os.environ.get(
+        'KNEEPIPELINE_CONFIG',
+        os.path.join(os.path.dirname(__file__), 'config.json')
+    )
     
     main(path_image, path_save, path_config, model_name)
