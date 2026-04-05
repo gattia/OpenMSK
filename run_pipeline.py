@@ -15,6 +15,8 @@ from pathlib import Path
 from steps._common import load_config
 from steps.segment import run as segment
 from steps.label_remap import run as label_remap
+from steps.generate_meshes import run as generate_meshes
+from steps.t2_mapping import run as t2_mapping
 
 
 def run_all(working_dir, model_name=None, config=None):
@@ -34,10 +36,11 @@ def run_all(working_dir, model_name=None, config=None):
         label_remap(working_dir, options={"remap_table": remap_table}, config=config)
 
     # Step 3: Mesh generation + cartilage thickness
-    # TODO: Phase 2 — from steps.generate_meshes import run as generate_meshes
+    generate_meshes(working_dir, config=config)
 
     # Step 4: T2 mapping (only for qDESS input)
-    # TODO: Phase 2 — from steps.t2_mapping import run as t2_mapping
+    if seg_result["is_qdess"]:
+        t2_mapping(working_dir, config=config)
 
     # Step 5: NSM fitting
     # TODO: Phase 3 — from steps.run_nsm import run as run_nsm
