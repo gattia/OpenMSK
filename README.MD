@@ -18,7 +18,7 @@ conda install -c conda-forge lit
 mkdir DEPENDENCIES
 cd DEPENDENCIES
 
-# Install NSM 
+# Install NSM
 git clone https://github.com/gattia/nsm
 cd nsm
 conda install pytorch torchvision torchaudio pytorch-cuda -c pytorch -c nvidia
@@ -29,6 +29,10 @@ pip install .
 # to download NSM models, install huggingface API
 pip install huggingface-hub
 
+# Install CUDA 11.8 and cuDNN 8.2 for TensorFlow GPU support
+# CRITICAL: TensorFlow 2.11 requires CUDA 11.x and cuDNN 8.x
+# PyTorch uses CUDA 12 but both can coexist
+conda install -c conda-forge cudatoolkit=11.8 cudnn=8.2 -y
 
 # Install DOSMA
 git clone https://github.com/gattia/DOSMA
@@ -46,11 +50,29 @@ cd DEPENDENCIES/nnunet_knee_inference
 # Follow install instructions in that repo's README for nnU-Net setup
 
 # IF HAVING ISSUES WITH TF, INSTALL VERSION 2.11 (pip install tensorflow==2.11)
+# If TensorFlow still can't find GPU, ensure LD_LIBRARY_PATH includes conda lib:
+# export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 ```
 
 ### Known Compatibility Issues: TensorFlow/Keras vs nnU-Net
 
-This environment requires both **TensorFlow/Keras** (for DOSMA segmentation models) and **nnU-Net** (for alternative segmentation). These packages have conflicting NumPy version requirements:
+This environment requires both **TensorFlow/Keras** (for DOSMA segmentation models) and **nnU-Net** (for alternative segmentation).
+
+#### CUDA Version Requirements (Critical for GPU Support)
+
+**TensorFlow 2.11 requires CUDA 11.x**, while PyTorch typically uses CUDA 12.x. Both can coexist in the same conda environment:
+- Install `cudatoolkit=11.8` and `cudnn=8.2` (see installation steps above)
+- Set `LD_LIBRARY_PATH` to include conda's lib directory when running the pipeline
+- For systemd services, add: `Environment="LD_LIBRARY_PATH=/path/to/conda/envs/kneepipeline/lib"`
+
+**Symptoms of CUDA mismatch:**
+```
+Could not load dynamic library 'libcudart.so.11.0'
+Could not load dynamic library 'libcudnn.so.8'
+The Conv2D op currently only supports the NHWC tensor format on the CPU
+```
+
+These packages also have conflicting NumPy version requirements:
 
 | Package | NumPy Requirement | Notes |
 |---------|-------------------|-------|
