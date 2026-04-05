@@ -17,6 +17,8 @@ from steps.segment import run as segment
 from steps.label_remap import run as label_remap
 from steps.generate_meshes import run as generate_meshes
 from steps.t2_mapping import run as t2_mapping
+from steps.run_nsm import run as run_nsm
+from steps.compute_bscore import run as compute_bscore
 
 
 def run_all(working_dir, model_name=None, config=None):
@@ -42,11 +44,22 @@ def run_all(working_dir, model_name=None, config=None):
     if seg_result["is_qdess"]:
         t2_mapping(working_dir, config=config)
 
-    # Step 5: NSM fitting
-    # TODO: Phase 3 — from steps.run_nsm import run as run_nsm
+    # Step 5 & 6: NSM fitting + BScore
+    if config.get("perform_bone_and_cart_nsm") or config.get("perform_bone_only_nsm"):
+        nsm_type = _get_nsm_type(config)
+        run_nsm(working_dir, options={"nsm_type": nsm_type}, config=config)
+        compute_bscore(working_dir, options={"bscore_type": nsm_type}, config=config)
 
-    # Step 6: BScore computation
-    # TODO: Phase 3 — from steps.compute_bscore import run as compute_bscore
+
+def _get_nsm_type(config):
+    """Determine NSM type from config flags."""
+    both = config.get("perform_bone_and_cart_nsm") and config.get("perform_bone_only_nsm")
+    if both:
+        return "both"
+    elif config.get("perform_bone_and_cart_nsm"):
+        return "bone_and_cart"
+    else:
+        return "bone_only"
 
 
 def _get_remap_table(model_name, config):
