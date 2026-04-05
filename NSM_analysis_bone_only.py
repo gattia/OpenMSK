@@ -2,7 +2,6 @@ import sys
 import torch
 import json
 import os
-import sys
 import vtk
 import numpy as np
 import gc
@@ -75,7 +74,7 @@ params = {
 
 # build the model 
 model = TriplanarDecoder(**params)
-saved_model_state = torch.load(path_model_state)
+saved_model_state = torch.load(path_model_state, weights_only=True)
 model.load_state_dict(saved_model_state["model"])
 model = model.cuda()
 model.eval()
@@ -130,7 +129,7 @@ latent = mesh_result['latent'].detach().cpu().numpy().tolist()
 bscore = Bscore(latent)
 
 # save the reconstructed meshes 
-if os.path.exists(loc_save_recons) == False:
+if not os.path.exists(loc_save_recons):
     os.makedirs(loc_save_recons, exist_ok=True)
 
 bone_mesh.save_mesh(os.path.join(loc_save_recons, f'NSM_bone_only_recon_{os.path.basename(path_meshes[0])}'))
@@ -151,6 +150,10 @@ elif isinstance(icp_transform, vtk.vtkMatrix4x4):
         for j in range(4):
             matrix[i, j] = icp_transform.GetElement(i, j)
     icp_transform = matrix
+elif icp_transform is None:
+    # Handle case where icp_transform is None
+    print("WARNING: icp_transform is None, using identity matrix")
+    icp_transform = np.eye(4)
 else:
     raise ValueError(f'icp_transform not a valid type: {type(icp_transform)}')
 
