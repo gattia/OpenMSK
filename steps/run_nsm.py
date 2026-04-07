@@ -168,11 +168,13 @@ def fit_nsm(mesh_paths, save_dir, config, bone_only=False, calc_assd=True):
 
     os.environ["LOC_SDF_CACHE"] = ""
 
-    # Reproducibility
+    model, model_config = _load_nsm_model(config, bone_only)
+
+    # Reproducibility — seed AFTER model loading to match the original
+    # NSM scripts. model.cuda() consumes CUDA random state, so seeding
+    # before it shifts the random sequence seen by reconstruct_mesh.
     torch.manual_seed(42)
     np.random.seed(42)
-
-    model, model_config = _load_nsm_model(config, bone_only)
 
     mesh_result = reconstruct_mesh(
         path=mesh_paths,
@@ -259,8 +261,6 @@ def _prepare_meshes(working_dir, bone, config):
     Returns:
         knee side ("left" or "right")
     """
-    import pyvista as pv
-
     working_dir = Path(working_dir)
 
     sitk_seg_subregions = load_subregions(working_dir)
@@ -268,29 +268,28 @@ def _prepare_meshes(working_dir, bone, config):
 
     side = determine_knee_side(seg_array, sitk_seg_subregions)
 
-    femur_mesh = pv.read(str(working_dir / f"{bone}_mesh_raw.vtk"))
+    from pymskt.mesh import Mesh
+
+    femur_mesh = Mesh(str(working_dir / f"{bone}_mesh_raw.vtk"))
 
     # Load cartilage mesh if available
     fem_cart_path = working_dir / f"{bone}_cart_0_mesh.vtk"
-    fem_cart_mesh = pv.read(str(fem_cart_path)) if fem_cart_path.exists() else None
+    fem_cart_mesh = Mesh(str(fem_cart_path)) if fem_cart_path.exists() else None
 
     if side == "left":
-        center = np.mean(femur_mesh.points, axis=0)[0]
-        femur_mesh.points[:, 0] *= -1
-        femur_mesh.points[:, 0] += 2 * center
+        center = np.mean(femur_mesh.point_coords, axis=0)[0]
+        femur_mesh.point_coords = femur_mesh.point_coords * [-1, 1, 1]
+        femur_mesh.point_coords = femur_mesh.point_coords + [2 * center, 0, 0]
         if fem_cart_mesh is not None:
-            fem_cart_mesh.points[:, 0] *= -1
-            fem_cart_mesh.points[:, 0] += 2 * center
+            fem_cart_mesh.point_coords = fem_cart_mesh.point_coords * [-1, 1, 1]
+            fem_cart_mesh.point_coords = fem_cart_mesh.point_coords + [2 * center, 0, 0]
 
     if config.get("clip_femur_top", True):
-        # clip_femur_top expects a pymskt Mesh, but works on anything with
-        # .points / .point_coords and .bounds / .clip methods.
-        # pyvista PolyData is compatible.
         femur_mesh = clip_femur_top(femur_mesh)
 
-    femur_mesh.save(str(working_dir / "femur_mesh_NSM_orig.vtk"))
+    femur_mesh.save_mesh(str(working_dir / "femur_mesh_NSM_orig.vtk"))
     if fem_cart_mesh is not None:
-        fem_cart_mesh.save(str(working_dir / "fem_cart_mesh_NSM_orig.vtk"))
+        fem_cart_mesh.save_mesh(str(working_dir / "fem_cart_mesh_NSM_orig.vtk"))
 
     return side
 
@@ -299,7 +298,40 @@ def _prepare_meshes(working_dir, bone, config):
 # Step entry point
 # ---------------------------------------------------------------------------
 
-def run(working_dir, options=None, config=None):
+def _fit_nsm_subprocess(mesh_paths, save_dir, config_path, bone_only=False, calc_assd=True):
+    """Run fit_nsm in a subprocess for clean CUDA state.
+
+    Each NSM fit gets a fresh process so CUDA memory layout and cuBLAS
+    workspace don't carry over between fits, ensuring reproducibility.
+    """
+    import subprocess
+
+    cmd = [
+        sys.executable, "-c",
+        f"""
+import sys, json, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath('{__file__}'))))
+from steps.run_nsm import fit_nsm
+from steps._common import load_config
+
+config = load_config({config_path!r})
+mesh_paths = {mesh_paths!r}
+result = fit_nsm(mesh_paths, {save_dir!r}, config, bone_only={bone_only!r}, calc_assd={calc_assd!r})
+print(json.dumps(result, default=str))
+"""
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"fit_nsm subprocess failed:\n{result.stderr[-1000:]}")
+
+    # Parse JSON from the last line of stdout
+    stdout_lines = result.stdout.strip().split("\n")
+    return json.loads(stdout_lines[-1])
+
+
+def run(working_dir, options=None, config=None, config_path=None):
     """Run NSM fitting step.
 
     Args:
@@ -308,6 +340,7 @@ def run(working_dir, options=None, config=None):
             - nsm_type: "bone_and_cart", "bone_only", or "both" (default: "bone_and_cart")
             - nsm_bones: list of bone names (default: ["femur"])
         config: Pipeline config dict.
+        config_path: Path to config.json file (needed for subprocess calls).
 
     Returns:
         Dict with nsm_results and knee_side.
@@ -316,6 +349,13 @@ def run(working_dir, options=None, config=None):
     options = options or {}
     nsm_type = options.get("nsm_type", "bone_and_cart")
     nsm_bones = options.get("nsm_bones", ["femur"])
+
+    # Resolve config_path for subprocess calls
+    if config_path is None:
+        config_path = os.environ.get(
+            "KNEEPIPELINE_CONFIG",
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"),
+        )
 
     results = {}
     knee_side = None
@@ -330,13 +370,17 @@ def run(working_dir, options=None, config=None):
                 str(working_dir / "femur_mesh_NSM_orig.vtk"),
                 str(working_dir / "fem_cart_mesh_NSM_orig.vtk"),
             ]
-            params = fit_nsm(mesh_paths, str(working_dir), config, bone_only=False)
+            params = _fit_nsm_subprocess(
+                mesh_paths, str(working_dir), config_path, bone_only=False,
+            )
             results[f"{bone}_bone_and_cart"] = params
 
         if nsm_type in ("bone_only", "both"):
             emit_progress(60, f"Running bone-only NSM for {bone}")
             mesh_paths = [str(working_dir / "femur_mesh_NSM_orig.vtk")]
-            params = fit_nsm(mesh_paths, str(working_dir), config, bone_only=True)
+            params = _fit_nsm_subprocess(
+                mesh_paths, str(working_dir), config_path, bone_only=True,
+            )
             results[f"{bone}_bone_only"] = params
 
     emit_progress(100, "NSM fitting complete")

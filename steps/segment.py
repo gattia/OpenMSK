@@ -60,6 +60,7 @@ def _load_image(path_image):
             reader.SetFileNames(dicom_names)
             image = reader.Execute()
             volume = MedicalVolume.from_sitk(image)
+            volume._volume = volume._volume.copy()
 
         is_qdess = qdess is not None
         filename_prefix = os.path.basename(path_image)
@@ -73,6 +74,11 @@ def _load_image(path_image):
     elif path_image.endswith(("nrrd", "dcm")):
         image = sitk.ReadImage(path_image)
         volume = MedicalVolume.from_sitk(image)
+        # MedicalVolume.from_sitk creates a zero-copy view of the SimpleITK
+        # image data. If `image` goes out of scope the underlying C++ data is
+        # freed, causing a use-after-free segfault. Force a copy so the volume
+        # owns its own data.
+        volume._volume = volume._volume.copy()
         is_qdess = False
         extension = ".nrrd" if path_image.endswith("nrrd") else ".dcm"
         filename_prefix = os.path.basename(path_image).replace(extension, "")

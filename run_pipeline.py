@@ -9,45 +9,103 @@ Usage:
 """
 
 import argparse
+import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 from steps._common import load_config
-from steps.segment import run as segment
-from steps.label_remap import run as label_remap
-from steps.generate_meshes import run as generate_meshes
-from steps.t2_mapping import run as t2_mapping
-from steps.run_nsm import run as run_nsm
-from steps.compute_bscore import run as compute_bscore
 
 
-def run_all(working_dir, model_name=None, config=None):
-    """Run the full pipeline: segment -> remap -> meshes -> t2 -> nsm -> bscore.
+def _run_step_subprocess(module_name, working_dir, options=None, config_path=None):
+    """Run a step module as a subprocess and return its JSON result.
 
-    Steps that are not yet implemented are noted with TODOs and will be
-    added as Phase 2 and Phase 3 land.
+    Used for steps that load GPU frameworks (TF, PyTorch) to ensure
+    GPU memory is fully released when the subprocess exits.
     """
+
+    cmd = [sys.executable, "-m", module_name, str(working_dir)]
+    if options:
+        cmd.extend(["--options", json.dumps(options)])
+    if config_path:
+        cmd.extend(["--config", str(config_path)])
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+    if result.returncode != 0:
+        if result.stdout:
+            print(result.stdout)
+        raise RuntimeError(
+            f"{module_name} failed (exit code {result.returncode}):\n{result.stderr[-1000:]}"
+        )
+
+    # Step prints progress on stdout, JSON result as last line
+    stdout_lines = result.stdout.strip().split("\n")
+    for line in stdout_lines[:-1]:
+        print(line)
+
+    try:
+        return json.loads(stdout_lines[-1])
+    except (json.JSONDecodeError, IndexError):
+        print(result.stdout)
+        raise RuntimeError(f"{module_name} did not produce valid JSON output")
+
+
+def _free_gpu_memory():
+    """Release GPU memory from TF and PyTorch."""
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    try:
+        import tensorflow as tf
+        # TF doesn't have a clean way to release GPU memory short of
+        # clearing the session. This at least frees cached tensors.
+        from tensorflow.python.eager import context
+        if context._context is not None:
+            context._context._clear_caches()
+    except (ImportError, AttributeError):
+        pass
+
+
+def run_all(working_dir, model_name=None, config=None, config_path=None):
+    """Run the full pipeline: segment -> remap -> meshes -> t2 -> nsm -> bscore."""
     working_dir = Path(working_dir)
 
-    # Step 1: Segmentation
-    seg_result = segment(working_dir, options={"model": model_name}, config=config)
+    # Step 1: Segmentation (subprocess — TF/PyTorch grab GPU memory and
+    # don't release it, so we need process isolation for later CUDA steps)
+    seg_result = _run_step_subprocess(
+        "steps.segment", working_dir,
+        options={"model": model_name},
+        config_path=config_path,
+    )
 
     # Step 2: Label remapping
+    from steps.label_remap import run as label_remap
     remap_table = _get_remap_table(seg_result["model_name"], config)
     if remap_table:
         label_remap(working_dir, options={"remap_table": remap_table}, config=config)
 
     # Step 3: Mesh generation + cartilage thickness
+    from steps.generate_meshes import run as generate_meshes
     generate_meshes(working_dir, config=config)
 
     # Step 4: T2 mapping (only for qDESS input)
     if seg_result["is_qdess"]:
+        from steps.t2_mapping import run as t2_mapping
         t2_mapping(working_dir, config=config)
 
-    # Step 5 & 6: NSM fitting + BScore
+    # Step 5 & 6: NSM fitting (subprocess for fresh CUDA) + BScore
     if config.get("perform_bone_and_cart_nsm") or config.get("perform_bone_only_nsm"):
         nsm_type = _get_nsm_type(config)
-        run_nsm(working_dir, options={"nsm_type": nsm_type}, config=config)
+        from steps.run_nsm import run as run_nsm
+        from steps.compute_bscore import run as compute_bscore
+        run_nsm(working_dir, options={"nsm_type": nsm_type}, config=config, config_path=config_path)
         compute_bscore(working_dir, options={"bscore_type": nsm_type}, config=config)
 
 
@@ -91,7 +149,11 @@ if __name__ == "__main__":
     parser.add_argument("--config", default=None, help="Path to config.json")
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    config_path = args.config or os.environ.get(
+        "KNEEPIPELINE_CONFIG",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"),
+    )
+    config = load_config(config_path)
 
     # Create output directory
     os.makedirs(args.path_save, exist_ok=True)
@@ -112,4 +174,4 @@ if __name__ == "__main__":
         if not link_name.exists():
             link_name.symlink_to(input_path.resolve())
 
-    run_all(save_path, model_name=args.model_name, config=config)
+    run_all(save_path, model_name=args.model_name, config=config, config_path=config_path)

@@ -999,3 +999,216 @@ first means the monolithic path works correctly until it's removed.
 13. **In-process vs subprocess for NSM** -- In-process by default. The step
     contract's CLI entry point provides subprocess isolation for free if
     GPU memory issues arise. No special subprocess wrapper code needed.
+
+---
+
+## Phase 5: Validation — keep old pipeline and compare results
+
+Do NOT remove the old pipeline scripts until new pipeline outputs have been
+compared against old pipeline outputs on real data.
+
+### Approach
+
+1. **Keep old scripts intact** throughout Phases 1–3. The old entry point
+   (`dosma_knee_seg.py` → `seg_thick_t2_pipeline.py` → `NSM_analysis*.py`)
+   must remain runnable alongside the new modular pipeline.
+
+2. **Run both pipelines on the same input(s)**. For at least one real knee MRI
+   (ideally one qDESS DICOM and one non-qDESS input):
+   ```bash
+   # Old pipeline
+   python dosma_knee_seg.py /path/to/image /tmp/old_output/
+
+   # New pipeline
+   python run_pipeline.py /path/to/image /tmp/new_output/
+   ```
+
+3. **Compare outputs**:
+   - Segmentation labels: voxel-wise diff of `*_all-labels.nii.gz` — should
+     be identical after remap (old pipeline uses DOSMA-native labels, new uses
+     canonical, so compare post-remap new vs old directly).
+   - Meshes: vertex count, ASSD between old/new meshes for each bone.
+   - Cartilage thickness metrics: compare JSON metrics — allow small float
+     tolerance (1e-6) for reordering/float arithmetic differences.
+   - T2 metrics: compare per-region T2 mean/std/median values.
+   - NSM latent vectors: element-wise diff — should be identical (same seeds,
+     same model, same input meshes).
+   - BScore: should match exactly (deterministic numpy computation from latent).
+
+4. **Document any differences** with rationale. Acceptable differences:
+   - Label indices differ (DOSMA-native vs canonical) — expected, just verify
+     the mapping is correct.
+   - `cartilage_smoothing` default changed from 0.3125 to 0.4 — document this
+     as intentional.
+   - Cartilage thickness NOT computed on NSM reconstruction — intentional removal.
+
+5. **Only after validation passes**, remove old scripts in Phase 4 cleanup.
+
+### What this changes in the phasing
+
+Phase 4 in the original plan ("Integration testing + cleanup") is split:
+- **Phase 4a**: Integration testing — run both pipelines, compare outputs.
+- **Phase 4b**: Cleanup — remove old scripts only after Phase 4a passes.
+
+---
+
+## Phase 6: qDESS detection and handling as a proper module
+
+### Problem
+
+qDESS handling is currently entangled with image loading in `_load_image()`.
+The function does two things at once:
+
+1. **Detects** whether input is qDESS (by trying `QDess.from_dicom()` and
+   catching exceptions on failure)
+2. **Pre-processes** the image differently for qDESS: calls `qdess.calc_rss()`
+   to combine two echo volumes via root-sum-of-squares, producing a single
+   volume for segmentation
+
+For non-qDESS DICOM, the volume is loaded directly via SimpleITK. For NIfTI
+and NRRD inputs, qDESS is assumed to be already RSS-combined / post-processed.
+
+This means the segmentation model always receives a single-volume input, but
+the *source* of that volume differs depending on qDESS status.
+
+### Current flow (entangled)
+
+```
+_load_image()
+├── DICOM dir?
+│   ├── Try QDess.from_dicom() → success → qdess.calc_rss() → volume, is_qdess=True
+│   └── Exception → sitk DICOM reader → volume, is_qdess=False
+├── NIfTI? → load directly (assumed already RSS) → is_qdess=False
+└── NRRD/DCM? → sitk.ReadImage() → is_qdess=False
+```
+
+The `qdess` object from loading is then kept alive until much later when
+T2 mapping calls `qdess.generate_t2_map()`. This couples image loading to
+T2 mapping through a long-lived object.
+
+### Proposed changes
+
+#### 1. Extract qDESS detection into a standalone function
+
+```python
+# In steps/segment.py (or steps/_common.py if T2 mapping also needs it)
+
+def detect_qdess(path_image):
+    """Check if a DICOM directory contains qDESS data.
+
+    Returns:
+        QDess object if qDESS detected, None otherwise.
+        Only works on DICOM directories — returns None for NIfTI/NRRD.
+    """
+    if not os.path.isdir(path_image):
+        return None
+
+    from dosma.scan_sequences import QDess
+
+    try:
+        try:
+            return QDess.from_dicom(str(path_image))
+        except KeyError:
+            return QDess.from_dicom(str(path_image), group_by="EchoTime")
+    except (ValueError, TypeError):
+        return None
+```
+
+#### 2. Simplify `_load_image()` to use `detect_qdess()`
+
+```python
+def _load_image(path_image):
+    path_image = str(path_image)
+
+    qdess = detect_qdess(path_image)
+
+    if os.path.isdir(path_image):
+        if qdess is not None:
+            # qDESS: RSS-combine two echo volumes into single volume
+            volume = qdess.calc_rss()
+        else:
+            # Generic DICOM
+            volume = _load_dicom_sitk(path_image)
+        filename_prefix = os.path.basename(path_image)
+
+    elif path_image.endswith(("nii", "nii.gz")):
+        # NIfTI assumed already RSS / post-processed
+        volume = dm.NiftiReader().load(path_image)
+        filename_prefix = os.path.basename(path_image).split(".nii")[0]
+
+    elif path_image.endswith(("nrrd", "dcm")):
+        volume = MedicalVolume.from_sitk(sitk.ReadImage(path_image))
+        ext = ".nrrd" if path_image.endswith("nrrd") else ".dcm"
+        filename_prefix = os.path.basename(path_image).replace(ext, "")
+
+    else:
+        raise ValueError("Image format not supported.")
+
+    return volume, qdess is not None, filename_prefix
+```
+
+#### 3. T2 mapping step loads `QDess` object (not re-detecting)
+
+The T2 mapping step only runs when the orchestrator already knows it's qDESS
+(from `seg_result["is_qdess"]`). So T2 mapping does NOT need to re-detect —
+it just loads the `QDess` object to access both echo volumes for T2
+computation.
+
+However, it still needs to **validate GL/TG tags** before computing T2.
+A scan can be structurally valid qDESS (two echoes, loads fine with
+`QDess.from_dicom()`) but have private tags stripped during DICOM
+anonymization, making T2 computation impossible.
+
+```python
+def run(working_dir, options=None, config=None):
+    dicom_dir = _find_dicom_dir(working_dir)
+
+    # Load QDess object — we already know this is qDESS,
+    # the orchestrator wouldn't call this step otherwise
+    qdess = _load_qdess(dicom_dir)
+
+    # Validate GL/TG tags (may be stripped by anonymization)
+    has_gl = qdess.get_metadata(qdess.__GL_AREA_TAG__, None) is not None
+    has_tg = qdess.get_metadata(qdess.__TG_TAG__, None) is not None
+    if not (has_gl and has_tg):
+        logging.warning(
+            "GL and TG tags not present — skipping T2 computation. "
+            "These are private tags and may have been removed during "
+            "DICOM anonymization."
+        )
+        return {"skipped": True, "reason": "missing_gl_tg_tags"}
+
+    # Compute T2 map using both echo volumes
+    t2map = qdess.generate_t2_map(...)
+```
+
+#### 4. Orchestrator flow for qDESS
+
+The orchestrator (`run_pipeline.py`) uses the `is_qdess` flag from the
+segmentation result to decide whether to run T2 mapping:
+
+```python
+seg_result = segment(working_dir, ...)
+
+if seg_result["is_qdess"]:
+    t2_mapping(working_dir, ...)
+```
+
+Detection happens once (in `segment`). T2 mapping trusts that decision and
+just loads the `QDess` object directly. The only extra check is GL/TG tag
+validation — a qDESS scan without these tags can be segmented (RSS still
+works) but can't produce T2 maps.
+
+### Key points about qDESS image handling
+
+- **qDESS acquires two echoes** — the raw DICOM contains interleaved echo
+  volumes
+- **For segmentation**: the two echoes are combined via **RSS
+  (root-sum-of-squares)** into a single volume (`qdess.calc_rss()`)
+- **For T2 mapping**: both echo volumes are needed separately — the T2 map
+  is computed from the ratio of echo signals plus scanner parameters (GL area
+  and TG tags)
+- **NIfTI/NRRD inputs** are assumed to already be RSS-combined or otherwise
+  post-processed — qDESS detection is skipped for these formats
+- This RSS step is why qDESS detection is coupled with image loading: the
+  detection determines *how* the volume for segmentation is constructed

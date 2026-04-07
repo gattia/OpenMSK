@@ -72,7 +72,7 @@ def run(working_dir, options=None, config=None):
         working_dir: Directory containing canonical-label segmentation.
         options: Dict with optional keys:
             - compute_thickness: bool (default True)
-            - cartilage_smoothing: float (default 0.4)
+            - cartilage_smoothing: float (default 0.3125)
         config: Pipeline config dict (unused currently -- bone config is
                 hardcoded with canonical labels).
 
@@ -84,7 +84,7 @@ def run(working_dir, options=None, config=None):
     working_dir = Path(working_dir)
     options = options or {}
     compute_thickness = options.get("compute_thickness", True)
-    cartilage_smoothing = options.get("cartilage_smoothing", 0.4)
+    cartilage_smoothing = options.get("cartilage_smoothing", 0.3125)
 
     emit_progress(0, "Loading segmentation")
     sitk_seg = load_segmentation(working_dir)
