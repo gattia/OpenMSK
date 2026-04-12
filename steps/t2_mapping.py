@@ -25,6 +25,7 @@ from steps._common import (
     load_segmentation,
     load_subregions,
     parse_step_args,
+    write_step_result,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -214,4 +215,4 @@ def _find_dicom_dir(working_dir):
 if __name__ == "__main__":
     args = parse_step_args()
     result = run(args.working_dir, args.options, args.config)
-    json.dump(result, sys.stdout)
+    write_step_result(args.working_dir, result)

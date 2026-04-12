@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from steps._common import emit_progress, parse_step_args
+from steps._common import emit_progress, parse_step_args, write_step_result
 
 
 def run(working_dir, options=None, config=None):
@@ -87,4 +87,4 @@ def _compute_bscore(params_file, model_path):
 if __name__ == "__main__":
     args = parse_step_args()
     result = run(args.working_dir, args.options, args.config)
-    json.dump(result, sys.stdout)
+    write_step_result(args.working_dir, result)

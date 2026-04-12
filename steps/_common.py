@@ -55,6 +55,14 @@ def emit_progress(percent: int, message: str):
     print(f"[PROGRESS] {percent}% {message}", flush=True)
 
 
+STEP_RESULT_FILENAME = "_step_result.json"
+
+
+def write_step_result(working_dir: Path, result: dict) -> None:
+    """Write step result dict to working_dir/_step_result.json."""
+    (Path(working_dir) / STEP_RESULT_FILENAME).write_text(json.dumps(result))
+
+
 def find_file(working_dir: Path, pattern: str) -> Path:
     """Glob for a single file matching pattern. Raises if 0 or >1 matches."""
     working_dir = Path(working_dir)

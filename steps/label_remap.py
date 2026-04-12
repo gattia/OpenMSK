@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
-from steps._common import emit_progress, find_file, parse_step_args
+from steps._common import emit_progress, find_file, parse_step_args, write_step_result
 
 
 def run(working_dir, options=None, config=None):
@@ -70,4 +70,4 @@ def run(working_dir, options=None, config=None):
 if __name__ == "__main__":
     args = parse_step_args()
     result = run(args.working_dir, args.options, args.config)
-    json.dump(result, sys.stdout)
+    write_step_result(args.working_dir, result)

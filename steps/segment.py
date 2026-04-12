@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
-from steps._common import emit_progress, parse_step_args
+from steps._common import emit_progress, parse_step_args, write_step_result
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -280,12 +280,15 @@ def run(working_dir, options=None, config=None):
         pass
 
     emit_progress(100, "Segmentation complete")
-    return {
+    result = {
         "seg_path": str(seg_path_nii),
         "is_qdess": is_qdess,
         "filename_prefix": filename_prefix,
         "model_name": model_name,
     }
+    if not is_qdess:
+        result["skip_steps"] = ["t2_mapping"]
+    return result
 
 
 def _find_input_image(working_dir):
@@ -328,4 +331,4 @@ def _find_input_image(working_dir):
 if __name__ == "__main__":
     args = parse_step_args()
     result = run(args.working_dir, args.options, args.config)
-    json.dump(result, sys.stdout)
+    write_step_result(args.working_dir, result)

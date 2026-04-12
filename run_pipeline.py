@@ -40,16 +40,18 @@ def _run_step_subprocess(module_name, working_dir, options=None, config_path=Non
             f"{module_name} failed (exit code {result.returncode}):\n{result.stderr[-1000:]}"
         )
 
-    # Step prints progress on stdout, JSON result as last line
-    stdout_lines = result.stdout.strip().split("\n")
-    for line in stdout_lines[:-1]:
-        print(line)
-
-    try:
-        return json.loads(stdout_lines[-1])
-    except (json.JSONDecodeError, IndexError):
+    # Print step's stdout (progress/logging)
+    if result.stdout.strip():
         print(result.stdout)
-        raise RuntimeError(f"{module_name} did not produce valid JSON output")
+
+    # Read result from file written by step
+    from steps._common import STEP_RESULT_FILENAME
+    result_path = working_dir / STEP_RESULT_FILENAME
+    if not result_path.exists():
+        raise RuntimeError(f"{module_name} did not produce a result file")
+    step_result = json.loads(result_path.read_text())
+    result_path.unlink()
+    return step_result
 
 
 def _free_gpu_memory():
