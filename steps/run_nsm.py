@@ -23,6 +23,7 @@ from steps._common import (
     load_segmentation,
     load_subregions,
     parse_step_args,
+    write_step_result,
 )
 from utils import clip_femur_top
 
@@ -146,7 +147,7 @@ def _convert_icp_transform(icp_transform):
 # NSM fitting
 # ---------------------------------------------------------------------------
 
-def fit_nsm(mesh_paths, save_dir, config, bone_only=False, calc_assd=True):
+def fit_nsm(mesh_paths, save_dir, config, bone_only=False, calc_assd=True, seed=42):
     """Fit NSM model to mesh(es).
 
     Unified replacement for NSM_analysis.py and NSM_analysis_bone_only.py.
@@ -158,6 +159,8 @@ def fit_nsm(mesh_paths, save_dir, config, bone_only=False, calc_assd=True):
         config: Pipeline config dict (already loaded).
         bone_only: If True, use bone-only model config.
         calc_assd: If True, compute ASSD metrics.
+        seed: Random seed for reproducibility (default: 42).
+              Set to None to skip seeding (non-deterministic).
 
     Returns:
         dict with latent, icp_transform, center, scale, assd metrics.
@@ -173,8 +176,9 @@ def fit_nsm(mesh_paths, save_dir, config, bone_only=False, calc_assd=True):
     # Reproducibility — seed AFTER model loading to match the original
     # NSM scripts. model.cuda() consumes CUDA random state, so seeding
     # before it shifts the random sequence seen by reconstruct_mesh.
-    torch.manual_seed(42)
-    np.random.seed(42)
+    if seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
 
     mesh_result = reconstruct_mesh(
         path=mesh_paths,
@@ -298,7 +302,7 @@ def _prepare_meshes(working_dir, bone, config):
 # Step entry point
 # ---------------------------------------------------------------------------
 
-def _fit_nsm_subprocess(mesh_paths, save_dir, config_path, bone_only=False, calc_assd=True):
+def _fit_nsm_subprocess(mesh_paths, save_dir, config_path, bone_only=False, calc_assd=True, seed=42):
     """Run fit_nsm in a subprocess for clean CUDA state.
 
     Each NSM fit gets a fresh process so CUDA memory layout and cuBLAS
@@ -316,7 +320,7 @@ from steps._common import load_config
 
 config = load_config({config_path!r})
 mesh_paths = {mesh_paths!r}
-result = fit_nsm(mesh_paths, {save_dir!r}, config, bone_only={bone_only!r}, calc_assd={calc_assd!r})
+result = fit_nsm(mesh_paths, {save_dir!r}, config, bone_only={bone_only!r}, calc_assd={calc_assd!r}, seed={seed!r})
 print(json.dumps(result, default=str))
 """
     ]
@@ -339,6 +343,8 @@ def run(working_dir, options=None, config=None, config_path=None):
         options: Dict with optional keys:
             - nsm_type: "bone_and_cart", "bone_only", or "both" (default: "bone_and_cart")
             - nsm_bones: list of bone names (default: ["femur"])
+            - seed: Random seed for NSM fitting (default: 42).
+                    Set to None to skip seeding (non-deterministic).
         config: Pipeline config dict.
         config_path: Path to config.json file (needed for subprocess calls).
 
@@ -349,6 +355,7 @@ def run(working_dir, options=None, config=None, config_path=None):
     options = options or {}
     nsm_type = options.get("nsm_type", "bone_and_cart")
     nsm_bones = options.get("nsm_bones", ["femur"])
+    seed = options.get("seed", 42)
 
     # Resolve config_path for subprocess calls
     if config_path is None:
@@ -371,7 +378,7 @@ def run(working_dir, options=None, config=None, config_path=None):
                 str(working_dir / "fem_cart_mesh_NSM_orig.vtk"),
             ]
             params = _fit_nsm_subprocess(
-                mesh_paths, str(working_dir), config_path, bone_only=False,
+                mesh_paths, str(working_dir), config_path, bone_only=False, seed=seed,
             )
             results[f"{bone}_bone_and_cart"] = params
 
@@ -379,7 +386,7 @@ def run(working_dir, options=None, config=None, config_path=None):
             emit_progress(60, f"Running bone-only NSM for {bone}")
             mesh_paths = [str(working_dir / "femur_mesh_NSM_orig.vtk")]
             params = _fit_nsm_subprocess(
-                mesh_paths, str(working_dir), config_path, bone_only=True,
+                mesh_paths, str(working_dir), config_path, bone_only=True, seed=seed,
             )
             results[f"{bone}_bone_only"] = params
 
@@ -390,4 +397,4 @@ def run(working_dir, options=None, config=None, config_path=None):
 if __name__ == "__main__":
     args = parse_step_args()
     result = run(args.working_dir, args.options, args.config)
-    json.dump(result, sys.stdout)
+    write_step_result(args.working_dir, result)
