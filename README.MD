@@ -196,22 +196,54 @@ Additional configuration parameters in `config.json`:
 - `batch_size`: (default: 32) - Batch size for segmentation model inference
 - `default_seg_model`: (default: "goyal_sagittal") - Default segmentation model when none specified
 
-### Run script
-To run script: 
+### Run pipeline
+
+The recommended entry point is `run_pipeline.py` (modular pipeline). The old `dosma_knee_seg.py` still works but is kept as a fallback.
+
 ```bash
-python /path/to/dosma_knee_seg.py <path_to_qdess_image> <path_to_save_results> [model_name]
+python run_pipeline.py <path_to_image> <path_to_save_results> [model_name] [--config /path/to/config.json]
 ```
 
 **Examples:**
 ```bash
 # Use default DOSMA model
-python dosma_knee_seg.py /path/to/image.nii.gz /path/to/results/
+python run_pipeline.py /path/to/image.nii.gz /path/to/results/
 
 # Use specific DOSMA model  
-python dosma_knee_seg.py /path/to/image.nii.gz /path/to/results/ goyal_sagittal
+python run_pipeline.py /path/to/image.nii.gz /path/to/results/ goyal_sagittal
 
 # Use nnU-Net segmentation
-python dosma_knee_seg.py /path/to/image.nii.gz /path/to/results/ nnunet_knee
+python run_pipeline.py /path/to/image.nii.gz /path/to/results/ nnunet_knee
+
+# Use a custom config
+python run_pipeline.py /path/to/image.nii.gz /path/to/results/ --config /path/to/config.json
+```
+
+You can also run individual steps for more control:
+```bash
+python -m steps.segment /path/to/working_dir --config config.json
+python -m steps.label_remap /path/to/working_dir --options '{"remap_table": {"1":7,"2":4,"3":5,"4":6,"7":1,"8":2,"9":3}}'
+python -m steps.generate_meshes /path/to/working_dir --config config.json
+python -m steps.t2_mapping /path/to/working_dir --config config.json
+python -m steps.run_nsm /path/to/working_dir --options '{"nsm_type": "both"}' --config config.json
+python -m steps.compute_bscore /path/to/working_dir --options '{"bscore_type": "both"}' --config config.json
+```
+
+#### Differences from old pipeline (`dosma_knee_seg.py`)
+
+The modular pipeline produces the same outputs but with improved reproducibility:
+- **NSM uses the dense (raw) femur mesh** instead of the pyacvd-resampled mesh, eliminating non-determinism from pyacvd cluster initialization
+- **Random seeds are set** before NSM optimization (`torch.manual_seed(42)`, `np.random.seed(42)`), making BScore reproducible across runs on the same input
+- **Seed is configurable** via the `seed` option in `steps.run_nsm` (default: 42, set to `null` for non-deterministic)
+- **GPU memory isolation** — segmentation and NSM fitting run as subprocesses so TensorFlow and PyTorch don't compete for GPU memory
+
+If you were using `dosma_knee_seg.py`, switching is just changing the command:
+```bash
+# Old:
+python dosma_knee_seg.py /path/to/image /path/to/output/ [model_name]
+
+# New:
+python run_pipeline.py /path/to/image /path/to/output/ [model_name]
 ```
 
 **Input Format Support:**
