@@ -57,6 +57,82 @@ class TestFindInputImage:
             _find_input_image(tmp_path)
 
 
+def _write_dicom_series(directory, n_slices=12, extension=""):
+    """Write a minimal readable DICOM series.
+
+    Defaults to no file extension, which is how Philips / PACS exports arrive.
+    """
+    from pydicom.dataset import Dataset, FileMetaDataset
+    from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
+
+    series_uid = generate_uid()
+    study_uid = generate_uid()
+    for i in range(n_slices):
+        ds = Dataset()
+        ds.file_meta = FileMetaDataset()
+        ds.file_meta.MediaStorageSOPClassUID = CTImageStorage
+        ds.file_meta.MediaStorageSOPInstanceUID = generate_uid()
+        ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+        ds.SOPClassUID = CTImageStorage
+        ds.SOPInstanceUID = ds.file_meta.MediaStorageSOPInstanceUID
+        ds.SeriesInstanceUID = series_uid
+        ds.StudyInstanceUID = study_uid
+        ds.Modality = "MR"
+        ds.Rows, ds.Columns = 16, 16
+        ds.SamplesPerPixel = 1
+        ds.PhotometricInterpretation = "MONOCHROME2"
+        ds.BitsAllocated = 16
+        ds.BitsStored = 16
+        ds.HighBit = 15
+        ds.PixelRepresentation = 0
+        ds.PixelSpacing = [1.0, 1.0]
+        ds.SliceThickness = 1.0
+        ds.ImagePositionPatient = [0.0, 0.0, float(i)]
+        ds.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
+        ds.InstanceNumber = i + 1
+        ds.PixelData = np.full((16, 16), i * 10, dtype=np.uint16).tobytes()
+        ds.save_as(
+            str(Path(directory) / f"IM_{i:04d}{extension}"), write_like_original=False
+        )
+    return series_uid
+
+
+class TestLoadImageDicom:
+    """Tests for _load_image on DICOM directories."""
+
+    def test_loads_extensionless_dicom_series(self, tmp_path):
+        """
+        Extensionless DICOM must load via the generic SimpleITK fallback.
+
+        Regression: DOSMA's file scanner only matches ``*.dcm``, so a Philips /
+        PACS export looks like an empty directory and QDess.from_dicom raises
+        FileNotFoundError. That was not caught, so the whole job died even though
+        GDCM reads these files fine. Failed for every segmentation model, since
+        the crash happens at load time before any model runs.
+        """
+        _write_dicom_series(tmp_path, n_slices=12, extension="")
+
+        volume, is_qdess, prefix = _load_image(tmp_path)
+
+        assert volume.shape == (16, 16, 12)
+        assert is_qdess is False
+        assert prefix == tmp_path.name
+
+    def test_extensionless_dicom_is_invisible_to_dosma(self, tmp_path):
+        """
+        Pins the upstream behaviour the fallback exists to absorb.
+
+        If DOSMA ever starts matching extensionless files, this fails and the
+        fallback above can be reconsidered.
+        """
+        from dosma.core.io.dicom_io import DicomReader
+
+        _write_dicom_series(tmp_path, n_slices=12, extension="")
+
+        assert DicomReader().get_files(str(tmp_path), ignore_ext=False) == []
+        assert len(DicomReader().get_files(str(tmp_path), ignore_ext=True)) == 12
+
+
 class TestRun:
     """Tests for the segment run() entry point."""
 

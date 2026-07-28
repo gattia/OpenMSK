@@ -292,8 +292,11 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
             except KeyError:
                 qdess = QDess.from_dicom(path_image, group_by='EchoTime')
             volume = qdess.calc_rss()
-        except (ValueError, TypeError):
-            # Not a qDESS scan — fall back to generic DICOM loading
+        except (ValueError, TypeError, FileNotFoundError):
+            # Not a qDESS scan — fall back to generic DICOM loading.
+            # FileNotFoundError: DOSMA only matches *.dcm, so extensionless DICOM
+            # (Philips / PACS exports) looks like an empty directory to it. GDCM
+            # below reads those fine, so fall through instead of failing the job.
             logging.info('Not a qDESS scan, loading as generic DICOM via SimpleITK...')
             qdess = None
             reader = sitk.ImageSeriesReader()
