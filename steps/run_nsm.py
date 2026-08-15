@@ -21,7 +21,6 @@ import SimpleITK as sitk
 from steps._common import (
     emit_progress,
     load_segmentation,
-    load_subregions,
     parse_step_args,
     write_step_result,
 )
@@ -267,10 +266,15 @@ def _prepare_meshes(working_dir, bone, config):
     """
     working_dir = Path(working_dir)
 
-    sitk_seg_subregions = load_subregions(working_dir)
-    seg_array = sitk.GetArrayFromImage(sitk_seg_subregions)
+    # The canonical segmentation, not *_subregions-labels.nii.gz: knee side is
+    # read off the medial/lateral tibial cartilage (canonical labels 5 and 6),
+    # which are in the segmentation itself. This step used to load the subregions
+    # file, which happens to contain them too -- and would then have failed for
+    # want of a file it does not use on any job where subregions skipped (D7b).
+    sitk_seg = load_segmentation(working_dir)
+    seg_array = sitk.GetArrayFromImage(sitk_seg)
 
-    side = determine_knee_side(seg_array, sitk_seg_subregions)
+    side = determine_knee_side(seg_array, sitk_seg)
 
     from pymskt.mesh import Mesh
 

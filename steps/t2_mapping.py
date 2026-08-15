@@ -5,9 +5,25 @@ depth-dependent T2 metrics if bone meshes are available.
 
 Extracts from seg_thick_t2_pipeline.py lines 433-503.
 
-Precondition: Input must be qDESS DICOM with GL/TG private tags.
-The orchestrator should check the is_qdess flag from segmentation
-and skip this step if false.
+Precondition: Input must be a two-echo qDESS DICOM series. The orchestrator
+should check the is_qdess flag from segmentation and skip this step if false;
+this step also declines (``skipped: True``) rather than failing if the input
+turns out not to be loadable as qDESS.
+
+The qDESS spoiler private tags (GL area 0x001910B6, TG 0x001910B7) are NOT a
+precondition. They are routinely stripped by DICOM anonymisation, and DOSMA
+falls back to the Sveinsson low-spoiling equations (6 & 7) without them. The
+two estimators disagree — low-spoiling reads low, by ~1.5% at 10-20 ms rising
+to ~5.4% at 60-80 ms, so it is not a constant factor and cannot be corrected
+after the fact — so the step reports which one ran as ``t2_method``:
+``"spoiled"`` or ``"low_spoiling"``.
+
+Neither the `subregions` step nor the `meshes` step is a precondition (D7).
+Missing subregions costs the five femur subregion metrics (labels 11-15) and
+leaves the whole-region ones (canonical labels 4-7, which live in the
+segmentation itself); missing meshes costs the depth-resolved (deep and
+superficial) metrics. Each is reported as ``has_subregions`` /
+``has_depth_dependent`` rather than raising.
 """
 
 import json
@@ -64,17 +80,50 @@ BONE_CONFIG_T2 = {
 }
 
 
+def read_spoiler_parameter(qdess, tag):
+    """Read a qDESS spoiler private tag (GL area or TG) as a float.
+
+    Returns None when there is no usable value, which is how an anonymised
+    scan normally looks. Callers turn that into the low-spoiling fallback.
+
+    Public because the monolith (seg_thick_t2_pipeline.py) imports it: both
+    paths must make the same spoiled/low-spoiling decision, or flipping
+    USE_ORCHESTRATOR would change which estimator a given scan gets.
+
+    Three ways to have no usable value, all treated alike:
+      - tag absent (anonymisation stripped it);
+      - tag present but zero, which is DOSMA's own "no spoiler parameters"
+        sentinel (qdess.py:202) — labelling that "spoiled" would be a lie;
+      - tag present but not castable to float, e.g. an untyped (VR "UN") value
+        from an export that dropped the private creator. DOSMA casts the raw
+        tag values it reads itself (qdess.py:200-201) and would raise on these;
+        low-spoiling T2 beats no T2 at all.
+    """
+    value = qdess.get_metadata(tag, None)
+    if value is None:
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        logging.warning("qDESS spoiler tag %s is present but not numeric: %r", tag, value)
+        return None
+    return value if value != 0 else None
+
+
 def run(working_dir, options=None, config=None):
     """Run T2 mapping step.
 
     Args:
-        working_dir: Directory containing DICOM input, segmentation, subregion
-            segmentation, and optionally bone meshes.
+        working_dir: Directory containing DICOM input and segmentation, and
+            optionally the subregion segmentation and bone meshes.
         options: Dict (no user-configurable options currently).
         config: Pipeline config dict (unused currently).
 
     Returns:
-        Dict with metrics and has_depth_dependent flag.
+        Dict with metrics, has_subregions and has_depth_dependent flags, and
+        t2_method ("spoiled" or "low_spoiling"). If the input is not a two-echo
+        qDESS series, returns {"skipped": True, "reason": ...} instead — that is
+        the only case in which T2 genuinely cannot be computed.
     """
     from dosma.scan_sequences import QDess
     from dosma.tissues import FemoralCartilage
@@ -84,28 +133,44 @@ def run(working_dir, options=None, config=None):
     options = options or {}
 
     emit_progress(0, "Loading qDESS data")
-    dicom_dir = _find_dicom_dir(working_dir)
-    try:
-        qdess = QDess.from_dicom(str(dicom_dir))
-    except KeyError:
-        qdess = QDess.from_dicom(str(dicom_dir), group_by="EchoTime")
+    qdess = _load_qdess(working_dir)
+    if qdess is None:
+        logging.info("Input is not a two-echo qDESS series. Skipping T2 computation.")
+        return {
+            "metrics": {},
+            "has_subregions": False,
+            "has_depth_dependent": False,
+            "skipped": True,
+            "reason": "not qDESS input",
+        }
 
-    # Check for required private tags
-    include_required_tags = (
-        (qdess.get_metadata(qdess.__GL_AREA_TAG__, None) is not None)
-        and (qdess.get_metadata(qdess.__TG_TAG__, None) is not None)
-    )
-    if not include_required_tags:
+    # Spoiler amplitude (GL area) and duration (TG) are qDESS private tags that
+    # DICOM anonymisation routinely strips. Their absence is NOT a reason to skip:
+    # DOSMA falls back to the Sveinsson low-spoiling equations (6 & 7). Record
+    # which estimator ran, because the two do not agree (see module docstring).
+    gl_area = read_spoiler_parameter(qdess, QDess.__GL_AREA_TAG__)
+    tg = read_spoiler_parameter(qdess, QDess.__TG_TAG__)
+    spoiled = gl_area is not None and tg is not None
+    t2_method = "spoiled" if spoiled else "low_spoiling"
+    if not spoiled:
         logging.warning(
-            "GL and TG tags not present. Skipping T2 computation. "
-            "NOTE: These are private tags and may have been removed "
-            "in the DICOM anonymization process."
+            "GL and TG tags not present (or zero). Computing T2 with the "
+            "low-spoiling approximation (Sveinsson eqs. 6 & 7). NOTE: these are "
+            "private tags and may have been removed in the DICOM anonymization "
+            "process. Low-spoiling T2 reads slightly low relative to the spoiled "
+            "solution; the step reports t2_method='low_spoiling'."
         )
-        return {"metrics": {}, "has_depth_dependent": False, "skipped": True}
 
     emit_progress(20, "Computing T2 map")
     cart = FemoralCartilage()
-    t2map = qdess.generate_t2_map(cart, suppress_fat=False, suppress_fluid=False)
+    t2map = qdess.generate_t2_map(
+        cart, suppress_fat=False, suppress_fluid=False,
+        # 0 is DOSMA's own sentinel for "no spoiler parameters" (qdess.py:202). It is
+        # passed rather than left None only because DOSMA would otherwise dereference
+        # the absent tags before reaching its fallback.
+        gl_area=gl_area if spoiled else 0, tg=tg if spoiled else 0,
+        spoiling=spoiled,
+    )
     sitk_t2map = t2map.volumetric_map.to_sitk(image_orientation="sagittal")
 
     # Determine filename prefix
@@ -116,10 +181,22 @@ def run(working_dir, options=None, config=None):
     sitk.WriteImage(sitk_t2map, str(working_dir / f"{filename_prefix}_t2map.nii.gz"), useCompression=False)
     sitk.WriteImage(sitk_t2map, str(working_dir / f"{filename_prefix}_t2map.nrrd"), useCompression=False)
 
-    # Load subregion segmentation for regional T2 statistics
+    # Load the label image the regional T2 statistics are computed over.
     emit_progress(40, "Computing T2 statistics")
-    sitk_seg_subregions = load_subregions(working_dir)
-    seg_array = sitk.GetArrayFromImage(sitk_seg_subregions)
+    try:
+        sitk_seg_regions = load_subregions(working_dir)
+        has_subregions = True
+    except FileNotFoundError:
+        # No subregions step in this job. Whole-region cartilage labels (4-7) live in
+        # the segmentation itself; only the femur subregions (11-15) are lost.
+        logging.info(
+            "No *_subregions-labels.nii.gz in %s. Computing whole-region T2 only; "
+            "the femur subregion metrics (labels 11-15) are not available.",
+            working_dir,
+        )
+        sitk_seg_regions = load_segmentation(working_dir)
+        has_subregions = False
+    seg_array = sitk.GetArrayFromImage(sitk_seg_regions)
 
     t2_array = sitk.GetArrayFromImage(sitk_t2map)
     t2_array[t2_array >= T2_MAX_VALID] = np.nan
@@ -141,7 +218,11 @@ def run(working_dir, options=None, config=None):
         (working_dir / f"{bone}_mesh.vtk").exists() for bone in BONE_CONFIG_T2
     )
 
-    if bone_meshes_available:
+    # combine_depth_region_segs() genuinely needs the subregion image, so the
+    # depth branch states that requirement here rather than at the top of the
+    # step: without meshes OR without subregions, the whole-region metrics above
+    # still stand (D7).
+    if has_subregions and bone_meshes_available:
         emit_progress(60, "Computing depth-dependent T2")
         try:
             sitk_seg = load_segmentation(working_dir)
@@ -164,7 +245,7 @@ def run(working_dir, options=None, config=None):
                 depth_segs.append(bone_new_seg)
 
             new_seg_combined = mskt.image.cartilage_processing.combine_depth_region_segs(
-                sitk_seg_subregions, depth_segs
+                sitk_seg_regions, depth_segs
             )
             sitk.WriteImage(
                 new_seg_combined,
@@ -187,17 +268,55 @@ def run(working_dir, options=None, config=None):
         except Exception:
             logging.error("Depth-dependent T2 failed, returning global T2 only", exc_info=True)
 
-    else:
+    elif not bone_meshes_available:
         logging.info("Bone meshes not found, skipping depth-dependent T2")
+    else:
+        logging.info("Subregion segmentation not found, skipping depth-dependent T2")
 
     # Save T2 results
     emit_progress(90, "Saving T2 results")
     if dict_results:
         with open(str(working_dir / f"{filename_prefix}_t2_results.json"), "w") as f:
-            json.dump(dict_results, f, indent=4)
+            # t2_method goes in the file as well as the step result: run_pipeline.py
+            # discards the step result, so for standalone runs the file is the only
+            # record of which estimator produced these numbers.
+            json.dump({**dict_results, "t2_method": t2_method}, f, indent=4)
 
     emit_progress(100, "T2 mapping complete")
-    return {"metrics": dict_results, "has_depth_dependent": has_depth_dependent}
+    return {
+        "metrics": dict_results,
+        "has_subregions": has_subregions,
+        "has_depth_dependent": has_depth_dependent,
+        "t2_method": t2_method,
+    }
+
+
+def _load_qdess(working_dir):
+    """Load the working directory's DICOM input as a two-echo qDESS scan.
+
+    Returns:
+        QDess, or None if the input is not a two-echo qDESS series (including
+        the case where there is no DICOM directory at all — e.g. a NIfTI job).
+        A None return means T2 genuinely cannot be computed; it says nothing
+        about the GL/TG spoiler tags.
+    """
+    from dosma.scan_sequences import QDess
+
+    try:
+        dicom_dir = _find_dicom_dir(Path(working_dir))
+    except FileNotFoundError:
+        return None
+
+    try:
+        try:
+            return QDess.from_dicom(str(dicom_dir))
+        except KeyError:
+            return QDess.from_dicom(str(dicom_dir), group_by="EchoTime")
+    except (ValueError, TypeError, FileNotFoundError, KeyError):
+        # Same set steps.segment tolerates when deciding is_qdess: not two echoes,
+        # unreadable as DICOM by DOSMA, or extensionless files DOSMA cannot see.
+        logging.info("Could not load input as qDESS", exc_info=True)
+        return None
 
 
 def _find_dicom_dir(working_dir):

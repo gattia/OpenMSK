@@ -128,6 +128,31 @@ def run_step_label_remap(working_dir, remap_table, config, result):
     print(f"    canonical labels: {sorted(labels)}")
 
 
+def run_step_subregions(working_dir, config, result):
+    """Its own stage since D7b — generate_meshes no longer produces this file.
+
+    Without a stage here the runner would still pass while the file was never
+    written, because both consumers now degrade rather than fail: femoral
+    thickness would quietly collapse from five subregions to one, and T2 would
+    lose labels 11-15. That is the check, not the file's mere existence.
+    """
+    from steps.subregions import run as subregions
+    result.result = subregions(working_dir, config=config)
+
+    result.check("not skipped", not result.result.get("skipped"))
+    result.check("*_subregions-labels.nii.gz exists",
+                 file_exists(working_dir, "*_subregions-labels.nii.gz"))
+    result.check("*_subregions-labels.nrrd exists",
+                 file_exists(working_dir, "*_subregions-labels.nrrd"))
+
+    labels = count_labels(working_dir, "*_subregions-labels.nii.gz")
+    # pymskt REPLACES femoral cartilage (canonical 4) with subregions 11-15,
+    # so 4 is expected to be absent here — verified against 60 archived jobs.
+    result.check("femur subregions 11-15 present",
+                 {11, 12, 13, 14, 15} <= set(labels))
+    print(f"    subregion labels: {sorted(labels)}")
+
+
 def run_step_generate_meshes(working_dir, config, result):
     from steps.generate_meshes import run as generate_meshes
     result.result = generate_meshes(working_dir, config=config)
@@ -137,8 +162,7 @@ def run_step_generate_meshes(working_dir, config, result):
     result.check("patella_mesh.vtk exists", file_exists(working_dir, "patella_mesh.vtk"))
     result.check("femur_mesh_raw.vtk exists", file_exists(working_dir, "femur_mesh_raw.vtk"))
     result.check("femur_cart_0_mesh.vtk exists", file_exists(working_dir, "femur_cart_0_mesh.vtk"))
-    result.check("*_subregions-labels.nii.gz exists",
-                 file_exists(working_dir, "*_subregions-labels.nii.gz"))
+    result.check("used the subregions file", result.result.get("has_subregions", False))
     result.check("thickness_results.json exists",
                  file_exists(working_dir, "*_thickness_results.json"))
 

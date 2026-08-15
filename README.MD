@@ -259,7 +259,7 @@ The pipeline supports multiple segmentation methods:
 The pipeline automatically detects the segmentation method based on the model name prefix. nnU-Net models provide state-of-the-art performance but require additional setup (see installation above).
 
 **T2 Analysis Requirements:**
-- T2 mapping only works with DICOM input that contains GL (Gradient Linearity) and TG (Transmit Gain) private tags
+- T2 mapping requires a **two-echo qDESS DICOM** input. The GL (spoiler gradient area) and TG (spoiler duration) private tags are *not* required: when they are missing — the normal state of anonymised DICOM — the Sveinsson low-spoiling equations are used instead, and the step reports `t2_method: "low_spoiling"` rather than `"spoiled"`. The two estimators differ by −1.4% at 10-20 ms up to −5.4% at 60-80 ms, so the label matters and is carried onto the analysis record
 - These tags may be removed during DICOM anonymization processes
 - T2 values are automatically clipped to the physiological range of 0-80ms
 - Analysis includes both full-thickness cartilage and depth-dependent layers (superficial/deep cartilage)

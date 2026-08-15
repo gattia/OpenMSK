@@ -32,7 +32,11 @@ def _load_image(path_image):
     Returns:
         (volume, is_qdess, filename_prefix)
         - volume: dosma MedicalVolume
-        - is_qdess: True if the input is a qDESS DICOM with GL/TG tags
+        - is_qdess: True if DOSMA could load the input as a two-echo qDESS
+          scan (``qdess is not None``). It says nothing about the GL/TG
+          spoiler private tags, which anonymisation routinely strips and which
+          T2 mapping does not require — steps.t2_mapping falls back to the
+          low-spoiling equations without them and labels which estimator ran.
         - filename_prefix: base name for output files (no extension)
     """
     from dosma.scan_sequences import QDess

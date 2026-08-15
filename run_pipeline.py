@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -91,18 +92,53 @@ def run_all(working_dir, model_name=None, config=None, config_path=None):
     from steps.label_remap import run as label_remap
     remap_table = _get_remap_table(seg_result["model_name"], config)
     if remap_table:
-        label_remap(working_dir, options={"remap_table": remap_table}, config=config)
+        remap_result = label_remap(working_dir, options={"remap_table": remap_table}, config=config)
+        # Inspect the result, not just the absence of an exception. The step can
+        # return successfully having declined to do anything -- the usual cause
+        # is a working directory that already holds a *-native.nii.gz, i.e. this
+        # ran before -- and every downstream step would then measure native
+        # labels while believing they are canonical: a "femur" mesh built from
+        # patellar cartilage, with no error anywhere. The website orchestrator
+        # treats a skip here as fatal for the same reason; this path is the one
+        # nothing else is watching.
+        if remap_result.get("skipped"):
+            raise RuntimeError(
+                f"label_remap declined to run ({remap_result.get('reason')}). "
+                f"Refusing to continue on labels that may not be canonical."
+            )
+        if remap_result.get("unmapped_labels"):
+            raise RuntimeError(
+                f"label_remap deleted native labels {remap_result['unmapped_labels']} "
+                f"-- they have no entry in the remap table for this model."
+            )
 
-    # Step 3: Mesh generation + cartilage thickness
+    # Step 3: Femur cartilage subregions.
+    # Its own step since D7b -- it is pure image processing on the canonical
+    # labels and never needed a mesh, which is why t2_mapping was able to depend
+    # on "meshes" for something meshes did not provide. It has to run here, and
+    # not inside generate_meshes, or BOTH consumers silently degrade: femoral
+    # thickness collapses from five subregions to one, and T2 loses labels 11-15.
+    # Non-fatal by design -- both consumers fall back -- so a skip is logged and
+    # the run continues.
+    from steps.subregions import run as subregions
+    subregions_result = subregions(working_dir, config=config)
+    if subregions_result.get("skipped"):
+        logging.warning(
+            "Subregion labelling skipped (%s); femoral regional thickness and "
+            "depth-resolved T2 will not be produced.",
+            subregions_result.get("reason"),
+        )
+
+    # Step 4: Mesh generation + cartilage thickness
     from steps.generate_meshes import run as generate_meshes
     generate_meshes(working_dir, config=config)
 
-    # Step 4: T2 mapping (only for qDESS input)
+    # Step 5: T2 mapping (only for qDESS input)
     if seg_result["is_qdess"]:
         from steps.t2_mapping import run as t2_mapping
         t2_mapping(working_dir, config=config)
 
-    # Step 5 & 6: NSM fitting (subprocess for fresh CUDA) + BScore
+    # Step 6 & 7: NSM fitting (subprocess for fresh CUDA) + BScore
     if config.get("perform_bone_and_cart_nsm") or config.get("perform_bone_only_nsm"):
         nsm_type = _get_nsm_type(config)
         from steps.run_nsm import run as run_nsm
@@ -127,16 +163,24 @@ def _get_remap_table(model_name, config):
 
     Returns None if no remapping is needed (model already uses canonical labels).
 
-    TODO: Once remap tables are validated against actual model outputs,
-    this should pull from the website repo's model_registry or from config.
-    For now, DOSMA and nnU-Net models share the same native label scheme.
+    Validated against actual model outputs on 2026-08-15: DOSMA and nnU-Net do
+    share one native label scheme. nnU-Net's own dataset.json declares it, the
+    same for the fullres and cascade configurations, and its inference wrapper
+    writes those labels through without remapping.
     """
     # DOSMA-native -> canonical remap
     # Native: 1=pat_cart, 2=fem_cart, 3=med_tib_cart, 4=lat_tib_cart,
-    #         7=femur, 8=tibia, 9=patella
-    # Canonical: 1=femur, 2=tibia, 3=patella, 4=fem_cart,
-    #            5=med_tib_cart, 6=lat_tib_cart, 7=pat_cart
-    DOSMA_REMAP = {1: 7, 2: 4, 3: 5, 4: 6, 7: 1, 8: 2, 9: 3}
+    #         5=med_meniscus, 6=lat_meniscus, 7=femur, 8=tibia, 9=patella
+    # Canonical: 1=femur, 2=tibia, 3=patella, 4=fem_cart, 5=med_tib_cart,
+    #            6=lat_tib_cart, 7=pat_cart, 8=med_meniscus, 9=lat_meniscus
+    #
+    # 5 and 6 were missing here until 2026-08-15. label_remap builds its output
+    # with np.zeros_like and writes only mapped values, so leaving them out did
+    # not leave the menisci alone -- it deleted them, silently, on every scan
+    # that had them (181 of 190 archived dosma_ananya jobs carry all nine).
+    # Must stay equal to DOSMA_NATIVE_LABEL_MAP in the website repo's
+    # model_registry.py; its TestLabelMapIntegrity is what notices if it does not.
+    DOSMA_REMAP = {1: 7, 2: 4, 3: 5, 4: 6, 5: 8, 6: 9, 7: 1, 8: 2, 9: 3}
 
     # All current models (DOSMA and nnU-Net) use the same native label scheme
     return DOSMA_REMAP

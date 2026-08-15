@@ -24,6 +24,9 @@ import time
 import logging
 from utils import clip_femur_top
 from dosma.models.seg_model import fill_holes, get_connected_segments
+# Shared with the modular pipeline so both paths agree on which T2 estimator to
+# use. Imports nothing heavier than SimpleITK at module scope.
+from steps.t2_mapping import read_spoiler_parameter
 
 # Setup simple logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -444,62 +447,82 @@ def main(path_image, path_save, path_config, model_name='goyal_sagittal'):
         tracker.start('t2_mapping')
         try:
             logging.info('Computing T2 Maps and Metrics...')
-            include_required_tags = (
-                (qdess.get_metadata(qdess.__GL_AREA_TAG__, None) is not None)
-                and (qdess.get_metadata(qdess.__TG_TAG__, None) is not None)
-            )
-            if not include_required_tags:
+            # Spoiler amplitude (GL area) and duration (TG) are qDESS private tags
+            # that DICOM anonymisation routinely strips. Their absence is NOT a
+            # reason to skip T2: DOSMA falls back to the Sveinsson low-spoiling
+            # equations (6 & 7). The two estimators disagree — low-spoiling reads
+            # low, by ~1.5% at 10-20 ms rising to ~5.4% at 60-80 ms, not a constant
+            # factor and so not correctable after the fact — so which one ran is
+            # written into the results as `t2_method`.
+            # Shared with steps/t2_mapping.py rather than reimplemented: the two
+            # paths must make the same spoiled/low-spoiling decision, or flipping
+            # USE_ORCHESTRATOR would change which estimator a given scan gets.
+            gl_area = read_spoiler_parameter(qdess, qdess.__GL_AREA_TAG__)
+            tg = read_spoiler_parameter(qdess, qdess.__TG_TAG__)
+            spoiled = gl_area is not None and tg is not None
+            if not spoiled:
                 logging.warning(
-                    'GL and TG tags not present. Skipping T2 computation. '
-                    'NOTE: These are private tags and may have been removed '
-                    'in the DICOM anonymization process.')
-                tracker.skip('t2_mapping')
-            else:
-                cart = FemoralCartilage()
-                t2map = qdess.generate_t2_map(cart, suppress_fat=False, suppress_fluid=False)
-                sitk_t2map = t2map.volumetric_map.to_sitk(image_orientation='sagittal')
+                    'GL and TG tags not present (or zero). Computing T2 with the '
+                    'low-spoiling approximation (Sveinsson eqs. 6 & 7). NOTE: These '
+                    'are private tags and may have been removed in the DICOM '
+                    'anonymization process.')
 
-                sitk.WriteImage(sitk_t2map, os.path.join(path_save, f'{filename_save}_t2map.nii.gz'), useCompression=False)
-                sitk.WriteImage(sitk_t2map, os.path.join(path_save, f'{filename_save}_t2map.nrrd'), useCompression=False)
+            cart = FemoralCartilage()
+            t2map = qdess.generate_t2_map(
+                cart, suppress_fat=False, suppress_fluid=False,
+                # 0 is DOSMA's own sentinel for "no spoiler parameters"
+                # (qdess.py:202). It is passed rather than left None only because
+                # DOSMA would otherwise dereference the absent tags before reaching
+                # its fallback.
+                gl_area=gl_area if spoiled else 0, tg=tg if spoiled else 0,
+                spoiling=spoiled,
+            )
+            # Label the output. Every T2 number below came from this estimator, and
+            # the results JSON/CSV is the only record the live path leaves behind.
+            dict_results['t2_method'] = 'spoiled' if spoiled else 'low_spoiling'
+            sitk_t2map = t2map.volumetric_map.to_sitk(image_orientation='sagittal')
 
-                seg_array = sitk.GetArrayFromImage(sitk_seg_subregions)
+            sitk.WriteImage(sitk_t2map, os.path.join(path_save, f'{filename_save}_t2map.nii.gz'), useCompression=False)
+            sitk.WriteImage(sitk_t2map, os.path.join(path_save, f'{filename_save}_t2map.nrrd'), useCompression=False)
 
-                t2_array = sitk.GetArrayFromImage(sitk_t2map)
-                t2_array[t2_array >= T2_MAX_VALID] = np.nan
-                t2_array[t2_array <= T2_MIN_VALID] = np.nan
+            seg_array = sitk.GetArrayFromImage(sitk_seg_subregions)
 
-                for cart_idx, cart_region in dict_regions['cart'].items():
-                    if cart_idx in seg_array:
-                        dict_results[f'{cart_region}_t2_ms_mean'] = np.nanmean(t2_array[seg_array == cart_idx])
-                        dict_results[f'{cart_region}_t2_ms_std'] = np.nanstd(t2_array[seg_array == cart_idx])
-                        dict_results[f'{cart_region}_t2_ms_median'] = np.nanmedian(t2_array[seg_array == cart_idx])
+            t2_array = sitk.GetArrayFromImage(sitk_t2map)
+            t2_array[t2_array >= T2_MAX_VALID] = np.nan
+            t2_array[t2_array <= T2_MIN_VALID] = np.nan
 
-                # Depth-dependent T2 metrics
-                for bone_name, bone_config in dict_bones.items():
-                    bone_mesh = bone_config['mesh']
-                    bone_mesh.list_cartilage_labels = bone_config['list_cart_labels']
-                    bone_mesh.seg_image = sitk_seg
-                    bone_new_seg, bone_rel_depth = bone_mesh.break_cartilage_into_superficial_deep(
-                        rel_depth_thresh=DEPTH_THRESHOLD, return_rel_depth=True, resample_cartilage_surface=10_000)
-                    bone_config['bone_new_seg'] = bone_new_seg
-                    bone_config['bone_rel_depth'] = bone_rel_depth
+            for cart_idx, cart_region in dict_regions['cart'].items():
+                if cart_idx in seg_array:
+                    dict_results[f'{cart_region}_t2_ms_mean'] = np.nanmean(t2_array[seg_array == cart_idx])
+                    dict_results[f'{cart_region}_t2_ms_std'] = np.nanstd(t2_array[seg_array == cart_idx])
+                    dict_results[f'{cart_region}_t2_ms_median'] = np.nanmedian(t2_array[seg_array == cart_idx])
 
-                new_seg_combined = mskt.image.cartilage_processing.combine_depth_region_segs(
-                    sitk_seg_subregions,
-                    [x['bone_new_seg'] for x in dict_bones.values()],
-                )
-                sitk.WriteImage(new_seg_combined, os.path.join(path_save, f'{filename_save}_depth_seg.nrrd'), useCompression=True)
+            # Depth-dependent T2 metrics
+            for bone_name, bone_config in dict_bones.items():
+                bone_mesh = bone_config['mesh']
+                bone_mesh.list_cartilage_labels = bone_config['list_cart_labels']
+                bone_mesh.seg_image = sitk_seg
+                bone_new_seg, bone_rel_depth = bone_mesh.break_cartilage_into_superficial_deep(
+                    rel_depth_thresh=DEPTH_THRESHOLD, return_rel_depth=True, resample_cartilage_surface=10_000)
+                bone_config['bone_new_seg'] = bone_new_seg
+                bone_config['bone_rel_depth'] = bone_rel_depth
 
-                seg_array_depth = sitk.GetArrayFromImage(new_seg_combined)
-                for cart_idx, cart_region in dict_regions['cart'].items():
-                    for depth_idx, depth_name in [(DEEP_OFFSET, 'deep'), (SUPERFICIAL_OFFSET, 'superficial')]:
-                        cart_idx_depth = cart_idx + depth_idx
-                        if cart_idx_depth in seg_array_depth:
-                            dict_results[f'{cart_region}_{depth_name}_t2_ms_mean'] = np.nanmean(t2_array[seg_array_depth == cart_idx_depth])
-                            dict_results[f'{cart_region}_{depth_name}_t2_ms_std'] = np.nanstd(t2_array[seg_array_depth == cart_idx_depth])
-                            dict_results[f'{cart_region}_{depth_name}_t2_ms_median'] = np.nanmedian(t2_array[seg_array_depth == cart_idx_depth])
+            new_seg_combined = mskt.image.cartilage_processing.combine_depth_region_segs(
+                sitk_seg_subregions,
+                [x['bone_new_seg'] for x in dict_bones.values()],
+            )
+            sitk.WriteImage(new_seg_combined, os.path.join(path_save, f'{filename_save}_depth_seg.nrrd'), useCompression=True)
 
-                tracker.complete('t2_mapping')
+            seg_array_depth = sitk.GetArrayFromImage(new_seg_combined)
+            for cart_idx, cart_region in dict_regions['cart'].items():
+                for depth_idx, depth_name in [(DEEP_OFFSET, 'deep'), (SUPERFICIAL_OFFSET, 'superficial')]:
+                    cart_idx_depth = cart_idx + depth_idx
+                    if cart_idx_depth in seg_array_depth:
+                        dict_results[f'{cart_region}_{depth_name}_t2_ms_mean'] = np.nanmean(t2_array[seg_array_depth == cart_idx_depth])
+                        dict_results[f'{cart_region}_{depth_name}_t2_ms_std'] = np.nanstd(t2_array[seg_array_depth == cart_idx_depth])
+                        dict_results[f'{cart_region}_{depth_name}_t2_ms_median'] = np.nanmedian(t2_array[seg_array_depth == cart_idx_depth])
+
+            tracker.complete('t2_mapping')
 
         except Exception:
             logging.error('T2 mapping failed', exc_info=True)
