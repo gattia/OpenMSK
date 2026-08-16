@@ -64,8 +64,10 @@ python -m steps.<module> <working_dir> [--options '<json>'] [--config '<path>']
 - `working_dir`: directory containing inputs from prior steps + original input
 - `--options`: JSON string with step-specific parameters
 - `--config`: path to pipeline `config.json`
-- **stdout**: progress lines (`[PROGRESS] <percent>% <message>`) followed by a JSON result as the last line
-- **exit code**: 0 on success, non-zero on failure
+- **stdout**: progress lines only (`[PROGRESS] <percent>% <message>`), plus free-form logging
+- **the result**: written to `<working_dir>/_step_result.json` by `_common.write_step_result()`. **It is NOT the last line of stdout** — that was true once and has not been since the "Write step results to file instead of stdout JSON" commit, because parsing JSON out of a stream that also carries TensorFlow's logging was fragile. `run_pipeline.py:48` reads the file, and so must any orchestrator.
+- **exit code**: 0 on success, non-zero on failure. **The exit code is not the whole answer**: a step can exit 0 having declined to do its work, and says so with `{"skipped": True, "reason": ...}` in its result. Read the result dict, not just the status. A skip from a step that had to run (`label_remap` on a model with a label map) means something went wrong.
+- **`skip_steps: [names]`** in a result means a *later* step cannot apply to this input — `segment` returns `["t2_mapping"]` for anything that is not a two-echo qDESS. Not a failure, and deliberately not a warning: it fires for every NIfTI and NRRD upload, so treating it as one would tell most users their job partially failed when nothing did.
 
 **Python interface** (if calling in-process):
 ```python
@@ -91,7 +93,11 @@ result = subprocess.run(
     capture_output=True, text=True, timeout=600,
     cwd="/path/to/kneepipeline",
 )
-seg_result = json.loads(result.stdout.strip().split("\n")[-1])
+# The result is a FILE, not the last line of stdout. Read it and delete it, so a
+# later step can never pick up its predecessor's result.
+_result_path = Path(working_dir) / "_step_result.json"
+seg_result = json.loads(_result_path.read_text())
+_result_path.unlink()
 # seg_result = {"seg_path": "...", "is_qdess": false, "filename_prefix": "...", "model_name": "..."}
 
 # Step 2: Label remapping
