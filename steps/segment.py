@@ -19,6 +19,30 @@ import SimpleITK as sitk
 
 from steps._common import emit_progress, parse_step_args, write_step_result
 
+# Deterministic segmentation.
+#
+# cuDNN picks convolution algorithms by benchmarking them at runtime, and
+# different algorithms sum floating point in different orders. The logits then
+# differ in their last bits, and argmax flips at voxels where two classes are
+# nearly tied -- always a handful of isolated voxels on a class boundary.
+#
+# Measured on the example scan: two runs of identical code on identical input
+# differed by **2 voxels in 25M** without these, and by **0** with them. Small,
+# but it is the first step and everything downstream inherits it: meshes,
+# thickness, NSM, BScore. A research archive that cannot reproduce its own
+# numbers is worth less than one that can, and NSM already goes to considerable
+# trouble to be deterministic (seeded torch, subprocess isolation, the seed
+# placed after `.cuda()`) -- it was inconsistent for the step feeding it not to.
+#
+# Must be set BEFORE TensorFlow initialises, which is why this is at module
+# level and not inside run(): TF reads them once, at import. `setdefault` so an
+# operator can still opt out.
+#
+# The monolith carries the same block -- it imports dosma at module import, so
+# it cannot share this one. Change both or neither.
+os.environ.setdefault("TF_DETERMINISTIC_OPS", "1")
+os.environ.setdefault("TF_CUDNN_DETERMINISTIC", "1")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 

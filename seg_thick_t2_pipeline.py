@@ -2,6 +2,21 @@
 import sys
 import os
 import json
+
+# Deterministic segmentation -- MUST precede the dosma import below, because
+# that pulls in TensorFlow and TF reads these once at init.
+#
+# cuDNN benchmarks convolution algorithms at runtime and different algorithms
+# sum floating point in different orders, so argmax flips at voxels where two
+# classes are nearly tied. Measured: 2 differing voxels in 25M between two runs
+# of identical code on identical input without these, 0 with them.
+#
+# The twin of this block is in steps/segment.py. That module imports dosma
+# lazily so it could set these later, but both paths must agree or a job's
+# numbers depend on which path ran it. Change both or neither.
+os.environ.setdefault("TF_DETERMINISTIC_OPS", "1")
+os.environ.setdefault("TF_CUDNN_DETERMINISTIC", "1")
+
 from dosma.scan_sequences import QDess
 from dosma import MedicalVolume
 import dosma as dm
