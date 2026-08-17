@@ -15,9 +15,6 @@ Usage:
 
     # Skip NSM/BScore (no GPU or just testing seg+mesh):
     python tests/integration/run_pipeline_test.py data/anthonys_knee.nrrd /tmp/test_fast --skip-nsm
-
-    # Also run old pipeline for comparison:
-    python tests/integration/run_pipeline_test.py data/anthonys_knee.nrrd /tmp/test_compare --compare-old
 """
 
 import argparse
@@ -255,137 +252,6 @@ def run_step_bscore(working_dir, config, result):
 
 
 # ---------------------------------------------------------------------------
-# Old pipeline runner (for comparison)
-# ---------------------------------------------------------------------------
-
-def run_old_pipeline(input_path, output_dir, model_name, config_path):
-    """Run the old monolithic pipeline via subprocess."""
-    import subprocess
-
-    os.makedirs(output_dir, exist_ok=True)
-    cmd = [
-        sys.executable,
-        str(PROJECT_ROOT / "dosma_knee_seg.py"),
-        str(input_path),
-        str(output_dir),
-    ]
-    if model_name:
-        cmd.append(model_name)
-
-    env = os.environ.copy()
-    if config_path:
-        env["KNEEPIPELINE_CONFIG"] = str(config_path)
-
-    print(f"\n  Running old pipeline: {' '.join(cmd)}")
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=3600)
-    if proc.returncode != 0:
-        print(f"  Old pipeline FAILED (exit {proc.returncode})")
-        print(f"  stderr: {proc.stderr[-2000:]}")
-        return False
-    print("  Old pipeline completed successfully")
-    return True
-
-
-def compare_outputs(new_dir, old_dir):
-    """Compare key outputs between new and old pipeline."""
-    import SimpleITK as sitk
-    import numpy as np
-
-    print("\n" + "=" * 70)
-    print("COMPARISON: new vs old pipeline")
-    print("=" * 70)
-
-    # Compare segmentation labels
-    new_segs = glob(str(Path(new_dir) / "*_all-labels.nii.gz"))
-    old_segs = glob(str(Path(old_dir) / "*_all-labels.nii.gz"))
-
-    if new_segs and old_segs:
-        new_img = sitk.ReadImage(new_segs[0])
-        old_img = sitk.ReadImage(old_segs[0])
-        new_arr = sitk.GetArrayFromImage(new_img)
-        old_arr = sitk.GetArrayFromImage(old_img)
-
-        print(f"\n  Segmentation shapes: new={new_arr.shape}, old={old_arr.shape}")
-        print(f"  New labels: {sorted(np.unique(new_arr))}")
-        print(f"  Old labels: {sorted(np.unique(old_arr))}")
-
-        if new_arr.shape == old_arr.shape:
-            # Old uses DOSMA-native labels, new uses canonical after remap.
-            # Map old labels to canonical for comparison.
-            DOSMA_REMAP = {1: 7, 2: 4, 3: 5, 4: 6, 7: 1, 8: 2, 9: 3}
-            old_remapped = np.zeros_like(old_arr)
-            for src, dst in DOSMA_REMAP.items():
-                old_remapped[old_arr == src] = dst
-
-            match = np.sum(new_arr == old_remapped)
-            total = new_arr.size
-            pct = 100.0 * match / total
-            print(f"  Voxel match (after remap): {match}/{total} ({pct:.2f}%)")
-            if pct < 99.99:
-                diff_mask = new_arr != old_remapped
-                diff_labels_new = np.unique(new_arr[diff_mask])
-                diff_labels_old = np.unique(old_remapped[diff_mask])
-                print(f"  Differing voxels: new labels={sorted(diff_labels_new)}, "
-                      f"old labels={sorted(diff_labels_old)}")
-        else:
-            print("  SHAPES DIFFER - cannot compare voxel-wise")
-
-    # Compare thickness results
-    new_thick = glob(str(Path(new_dir) / "*_thickness_results.json"))
-    old_thick = glob(str(Path(old_dir) / "*_thickness_results.json"))
-    if new_thick and old_thick:
-        new_metrics = json.loads(Path(new_thick[0]).read_text())
-        old_metrics = json.loads(Path(old_thick[0]).read_text())
-        print("\n  Thickness comparison:")
-        all_keys = sorted(set(list(new_metrics.keys()) + list(old_metrics.keys())))
-        for k in all_keys:
-            nv = new_metrics.get(k, "MISSING")
-            ov = old_metrics.get(k, "MISSING")
-            if isinstance(nv, (int, float)) and isinstance(ov, (int, float)):
-                diff = abs(nv - ov)
-                flag = " ***" if diff > 1e-4 else ""
-                print(f"    {k}: new={nv:.4f}  old={ov:.4f}  diff={diff:.6f}{flag}")
-            else:
-                print(f"    {k}: new={nv}  old={ov}")
-
-    # Compare NSM params
-    for params_file in ["NSM_recon_params.json", "NSM_bone_only_recon_params.json"]:
-        new_p = Path(new_dir) / params_file
-        old_p = Path(old_dir) / params_file
-        if new_p.exists() and old_p.exists():
-            new_params = json.loads(new_p.read_text())
-            old_params = json.loads(old_p.read_text())
-            print(f"\n  {params_file}:")
-            for key in ["assd_bone_mm", "assd_cartilage_mm", "scale"]:
-                if key in new_params and key in old_params:
-                    diff = abs(new_params[key] - old_params[key])
-                    print(f"    {key}: new={new_params[key]:.4f}  "
-                          f"old={old_params[key]:.4f}  diff={diff:.6f}")
-            if "latent" in new_params and "latent" in old_params:
-                new_lat = np.array(new_params["latent"]).flatten()
-                old_lat = np.array(old_params["latent"]).flatten()
-                if len(new_lat) == len(old_lat):
-                    l2 = np.linalg.norm(new_lat - old_lat)
-                    print(f"    latent L2 diff: {l2:.6f}")
-
-    # Compare BScore
-    new_bs = Path(new_dir) / "bscore_results.json"
-    old_bs_files = glob(str(Path(old_dir) / "*bscore*"))
-    if new_bs.exists() and old_bs_files:
-        print(f"\n  BScore: new={json.loads(new_bs.read_text())}")
-
-    # List files in each
-    print("\n  Files in new output:")
-    for f in sorted(os.listdir(new_dir)):
-        sz = os.path.getsize(Path(new_dir) / f)
-        print(f"    {f}  ({sz:,} bytes)")
-    print("\n  Files in old output:")
-    for f in sorted(os.listdir(old_dir)):
-        sz = os.path.getsize(Path(old_dir) / f)
-        print(f"    {f}  ({sz:,} bytes)")
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -394,6 +260,11 @@ DOSMA_REMAP = {1: 7, 2: 4, 3: 5, 4: 6, 7: 1, 8: 2, 9: 3}
 STEPS = [
     ("segment", run_step_segment),
     ("label_remap", run_step_label_remap),
+    # subregions must run BEFORE generate_meshes: since D7b it produces
+    # *_subregions-labels.*, which generate_meshes and t2_mapping both consume.
+    # Omitting it does not fail loudly -- both consumers fall back -- it just
+    # silently costs femoral regional thickness and the depth-resolved T2.
+    ("subregions", run_step_subregions),
     ("generate_meshes", run_step_generate_meshes),
     ("t2_mapping", run_step_t2_mapping),
     ("nsm", run_step_nsm),
@@ -412,14 +283,11 @@ def main():
                         help="Skip NSM and BScore steps")
     parser.add_argument("--skip-t2", action="store_true",
                         help="Skip T2 mapping even for qDESS input")
-    parser.add_argument("--compare-old", action="store_true",
-                        help="Also run old pipeline and compare outputs")
     args = parser.parse_args()
 
     input_path = Path(args.input_path).resolve()
     output_dir = Path(args.output_dir).resolve()
     config = load_config(args.config)
-    config_path = args.config
 
     if not input_path.exists():
         print(f"ERROR: Input path does not exist: {input_path}")
@@ -448,7 +316,6 @@ def main():
     print(f"  Model:  {args.model or config.get('default_seg_model', '(default)')}")
     print(f"  Skip NSM: {args.skip_nsm}")
     print(f"  Skip T2:  {args.skip_t2}")
-    print(f"  Compare old: {args.compare_old}")
     print()
 
     results = []
@@ -482,8 +349,16 @@ def main():
                 step_fn(output_dir, DOSMA_REMAP, config, sr)
             elif step_name == "t2_mapping":
                 step_fn(output_dir, config, sr)
-            elif step_name in ("generate_meshes", "nsm", "bscore"):
+            elif step_name in ("subregions", "generate_meshes", "nsm", "bscore"):
                 step_fn(output_dir, config, sr)
+            else:
+                # A step listed in STEPS but missing from this chain would call
+                # nothing, record nothing, and still be reported as a pass --
+                # which is exactly how `subregions` went unrun after D7b split
+                # it out. Fail loudly instead.
+                raise RuntimeError(
+                    f"step {step_name!r} is in STEPS but has no dispatch branch"
+                )
 
             sr.duration = time.time() - t0
             failed_checks = [desc for desc, ok in sr.checks if not ok]
@@ -506,14 +381,6 @@ def main():
         results.append(sr)
         status_icon = {"pass": "PASS", "fail": "FAIL", "skip": "SKIP"}[sr.status]
         print(f"  [{step_name}] {status_icon} ({sr.duration:.1f}s)\n")
-
-    # Run old pipeline for comparison if requested
-    if args.compare_old:
-        old_output = str(output_dir) + "_old"
-        print(f"\nRunning old pipeline for comparison -> {old_output}")
-        old_ok = run_old_pipeline(input_path, old_output, args.model, config_path)
-        if old_ok:
-            compare_outputs(str(output_dir), old_output)
 
     # Summary
     print("\n" + "=" * 70)

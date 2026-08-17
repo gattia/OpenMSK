@@ -14,11 +14,8 @@ An automated pipeline for analyzing knee MRI scans. Given a knee MRI image (DICO
 
 ## Architecture
 
-There are two pipeline implementations. The **modular pipeline** (`steps/`) is the active one. The **monolith** (`seg_thick_t2_pipeline.py`) is kept as a fallback until the website integration is verified.
-
-### Modular Pipeline (active)
-
-Each step is an independent module that works as both a Python import and a CLI entry point:
+**There is one pipeline: the step modules in `steps/`.** Each step is an independent
+module that works as both a Python import and a CLI entry point:
 
 ```
 run_pipeline.py                    (standalone orchestrator — chains all steps)
@@ -32,21 +29,19 @@ run_pipeline.py                    (standalone orchestrator — chains all steps
     +--> steps/compute_bscore.py   (BScore from latent — in-process)
 ```
 
-### Monolith (legacy, kept until website integration verified)
-
-```
-dosma_knee_seg.py  (orchestrator / entry point)
-    |
-    +--> seg_thick_t2_pipeline.py  (segmentation, meshing, thickness, T2)
-    +--> NSM_analysis.py           (bone+cartilage NSM fitting)
-    +--> NSM_analysis_bone_only.py (bone-only NSM fitting)
-```
+A single-process implementation (`seg_thick_t2_pipeline.py`, driven by
+`dosma_knee_seg.py`, with `NSM_analysis.py` / `NSM_analysis_bone_only.py` for the NSM
+fits) ran production until the website cut over to the steps on 2026-08-17, and was
+**deleted on 2026-08-17**. Git history is the only copy; do not reintroduce a second
+implementation. Carrying two cost three fixes that had to land twice, each silent if
+the second copy was missed — the extensionless-DICOM `except` clause, the qDESS
+spoiler-tag guard, and the cuDNN determinism env vars.
 
 ## Website / Orchestrator Integration Guide
 
-The modular pipeline is designed for two calling patterns:
+The pipeline is designed for two calling patterns:
 
-### Pattern 1: Standalone (replaces `dosma_knee_seg.py`)
+### Pattern 1: Standalone
 
 ```bash
 python run_pipeline.py /path/to/image /path/to/output/ [model_name] [--config /path/to/config.json]
@@ -180,7 +175,7 @@ result = subprocess.run(
 
 ## Canonical Label Set
 
-The modular pipeline uses canonical labels. After segmentation, `label_remap` converts model-native labels to canonical. All downstream steps use canonical labels.
+After segmentation, `label_remap` converts model-native labels to canonical. All downstream steps use canonical labels.
 
 | Index | Structure | DOSMA Native Index |
 |-------|-----------|--------------------|
@@ -198,7 +193,11 @@ The modular pipeline uses canonical labels. After segmentation, `label_remap` co
 
 The DOSMA-native to canonical remap table: `{1: 7, 2: 4, 3: 5, 4: 6, 5: 8, 6: 9, 7: 1, 8: 2, 9: 3}`
 
-The monolith uses DOSMA-native labels throughout (no remapping step).
+⚠️ **Every archived job produced before the orchestrator cutover carries
+DOSMA-native labels**, because the pipeline that produced them had no remapping
+step. Reading one of those files with the canonical map paints every bone as
+cartilage. The website's `model_registry.CANONICAL_LABELS` is the post-remap set
+and is not what is on disk for those jobs.
 
 **The menisci are real, and this table said they were not until 2026-08-15.**
 Native 5 and 6 used to be listed as "—" here and were missing from
@@ -228,7 +227,7 @@ its `TestLabelMapIntegrity` is what notices if the two repos drift apart.
 
 ## File Descriptions
 
-### Modular Pipeline (`steps/`)
+### Pipeline steps (`steps/`)
 
 - **`steps/__init__.py`** — Package init.
 
@@ -244,7 +243,7 @@ its `TestLabelMapIntegrity` is what notices if the two repos drift apart.
 
 - **`steps/t2_mapping.py`** — T2 relaxation maps from qDESS DICOM. Global and depth-dependent T2 metrics per region. Soft dependency on meshes (depth-dependent T2 skipped if meshes unavailable).
 
-- **`steps/run_nsm.py`** — Unified NSM fitting (replaces both `NSM_analysis.py` and `NSM_analysis_bone_only.py`). Contains:
+- **`steps/run_nsm.py`** — NSM fitting, bone+cartilage and bone-only in one module (`bone_only` flag). Contains:
   - `determine_knee_side()` — parameterized with canonical label indices
   - `_load_nsm_model()` — model loading with `weights_only=True`
   - `_convert_icp_transform()` — handles all VTK types + None
@@ -252,19 +251,13 @@ its `TestLabelMapIntegrity` is what notices if the two repos drift apart.
   - `_fit_nsm_subprocess()` — runs each fit in a fresh subprocess for CUDA state isolation
   - `_prepare_meshes()` — knee side detection, mirroring, clipping
   - **Seed ordering**: `torch.manual_seed(42)` must be set AFTER `model.cuda()`, not before. `model.cuda()` consumes CUDA random state.
+  - **No thickness on the reconstruction**, deliberately: the reconstruction is a template fit, not patient anatomy. Thickness comes from `generate_meshes.py`, on the real meshes.
 
 - **`steps/compute_bscore.py`** — BScore from NSM latent vectors. Pure numpy, no GPU. Clears `sys.modules["Bscore"]` before import to handle different model paths.
 
 ### Standalone Entry Point
 
 - **`run_pipeline.py`** — Chains all steps. Segmentation runs as subprocess (TF GPU isolation). NSM fits run as subprocesses (CUDA state isolation). Other steps run in-process. Uses lazy imports to avoid loading TF/torch at module level.
-
-### Legacy Monolith (kept until website integration verified)
-
-- **`dosma_knee_seg.py`** — Old orchestrator. Will be removed.
-- **`seg_thick_t2_pipeline.py`** — Old monolithic workhorse (~577 lines). Will be removed.
-- **`NSM_analysis.py`** — Old bone+cartilage NSM. Will be removed.
-- **`NSM_analysis_bone_only.py`** — Old bone-only NSM. Will be removed.
 
 ### Other Files
 
@@ -274,9 +267,10 @@ its `TestLabelMapIntegrity` is what notices if the two repos drift apart.
 
 ### Test Files
 
-- **`tests/test_steps/`** — 37 unit tests covering all step modules.
-- **`tests/integration/compare_pipelines.py`** — Compares monolith vs modular pipeline output on real data (segmentation, meshes, thickness, NSM, BScore).
+- **`tests/test_steps/`** — 124 unit tests covering all step modules. No GPU needed. This is the suite that must stay green.
+- **`tests/integration/run_pipeline_test.py`** — Runs the steps on real data and validates the outputs. Driven by `tests/integration/run_all.sh`.
 - **`tests/integration/test_tf_torch_conflict.py`** — Diagnostic tests for TF/numpy/torch environment issues.
+- **`tests/integration/test_seg_quick.py`** — Smoke test: does DOSMA segmentation run at all.
 
 ## Configuration
 
@@ -289,8 +283,15 @@ its `TestLabelMapIntegrity` is what notices if the two repos drift apart.
   - `nnunet` — nnU-Net configuration (type: "cascade" or "fullres")
   - `nsm` / `nsm_bone_only` — Paths to NSM model configs and state dicts
   - `bscore` / `bscore_bone_only` — Paths to BScore model folders
-  - `regions` — Segmentation label index to region name mapping (DOSMA-native, used by monolith)
-  - `bones` — Per-bone mesh config with DOSMA-native label indices (used by monolith)
+
+  ⚠️ **`regions` and `bones` were removed on 2026-08-17** along with the pipeline that
+  read them. They held DOSMA-native label indices and region names, and nothing in
+  `steps/` or `run_pipeline.py` ever read them — the equivalents live in
+  `generate_meshes.BONE_CONFIG` and `generate_meshes.CANONICAL_REGION_NAMES`, in
+  canonical labels. `config.json` is generated per job by the website from this base
+  file (`config_generator.generate_pipeline_config()` copies it and overrides named
+  keys only), so re-adding them would just put dead DOSMA-native data back into every
+  job config.
 
 ## Key Dependencies
 
@@ -312,23 +313,22 @@ TensorFlow 2.11 and PyTorch coexist but have conflicting CUDA requirements. TF n
 ## How to Run
 
 ```bash
-# Modular pipeline (recommended)
+# Whole pipeline
 python run_pipeline.py /path/to/image /path/to/output/ [model_name]
 python run_pipeline.py /path/to/image /path/to/output/ --config /path/to/config.json
 
 # Individual steps
 python -m steps.segment /path/to/working_dir --options '{"model": "nnunet_knee"}' --config config.json
-python -m steps.label_remap /path/to/working_dir --options '{"remap_table": {"1":7,"2":4,"3":5,"4":6,"7":1,"8":2,"9":3}}'
+python -m steps.label_remap /path/to/working_dir --options '{"remap_table": {"1":7,"2":4,"3":5,"4":6,"5":8,"6":9,"7":1,"8":2,"9":3}}'
+python -m steps.subregions /path/to/working_dir --config config.json
 python -m steps.generate_meshes /path/to/working_dir --config config.json
+python -m steps.t2_mapping /path/to/working_dir --config config.json
 python -m steps.run_nsm /path/to/working_dir --options '{"nsm_type": "both"}' --config config.json
 python -m steps.compute_bscore /path/to/working_dir --options '{"bscore_type": "both"}' --config config.json
 
-# Legacy monolith (still works, will be removed after website integration)
-python dosma_knee_seg.py /path/to/image /path/to/output/ [model_name]
-
 # Run tests
-python -m pytest tests/test_steps/ -v          # unit tests (no GPU needed)
-conda run -n kneepipeline python tests/integration/compare_pipelines.py data/anthonys_knee.nrrd --model acl_qdess_bone_july_2024 --keep-output  # integration test
+python -m pytest tests/test_steps/ -v          # unit tests (no GPU needed), 124 passing
+./tests/integration/run_all.sh                 # integration, needs GPU + data/
 
 # Override config location
 KNEEPIPELINE_CONFIG=/path/to/custom_config.json python run_pipeline.py ...
@@ -348,16 +348,18 @@ KNEEPIPELINE_CONFIG=/path/to/custom_config.json python run_pipeline.py ...
 
 6. **Segmentation non-determinism** — TF and nnU-Net produce slightly different results across runs (1-2 voxels for DOSMA, ~84 for nnU-Net). This is GPU floating-point non-determinism, not a code bug.
 
-7. **`sys.path.append` for BScore** — Both the old NSM scripts and `steps/compute_bscore.py` manipulate `sys.path` to import `Bscore` from a configured folder. Consider making BScore a proper installable package.
+7. **`sys.path.append` for BScore** — `steps/compute_bscore.py` manipulates `sys.path` to import `Bscore` from a configured folder, and clears `sys.modules["Bscore"]` first so a second model folder is not shadowed by the first. Consider making BScore a proper installable package.
 
-8. **NIfTI float32 affine — fixed 2026-08-16, do not undo** — NIfTI stores the image affine as float32, so a `.nii.gz` write→read moves the direction cosines by **1.354e-08** (measured on `data/anthonys_knee.nrrd`; NRRD roundtrips it at **0.0**). That is not cosmetic: marching-cubes vertices move ~1.5e-05 mm, pyacvd (deterministic in itself) lands on a different clustering — verified on a real segmentation, tibia vertices then differ by **77 mm** and vertex counts can change — and regional thickness shifts 0.007-0.02 mm. It was the whole reason the modular pipeline disagreed with the monolith on `med_tib_cart_mm_mean` (the monolith holds one image in memory and never reads one back). **Inter-step reads therefore go through the `.nrrd`** (`_common.find_image_file`). Reading a label image with a bare `sitk.ReadImage(...nii.gz)` in a new step reintroduces it. Pinned by `tests/test_steps/test_image_precision.py`.
+8. **NIfTI float32 affine — fixed 2026-08-16, do not undo** — NIfTI stores the image affine as float32, so a `.nii.gz` write→read moves the direction cosines by **1.354e-08** (measured on `data/anthonys_knee.nrrd`; NRRD roundtrips it at **0.0**). That is not cosmetic: marching-cubes vertices move ~1.5e-05 mm, pyacvd (deterministic in itself) lands on a different clustering — verified on a real segmentation, tibia vertices then differ by **77 mm** and vertex counts can change — and regional thickness shifts 0.007-0.02 mm. It was the whole reason the step-based pipeline disagreed with its single-process predecessor on `med_tib_cart_mm_mean` — that one held a single image in memory for the entire run and never read one back, so it never had a handoff to lose precision at. **Inter-step reads therefore go through the `.nrrd`** (`_common.find_image_file`). Reading a label image with a bare `sitk.ReadImage(...nii.gz)` in a new step reintroduces it. Pinned by `tests/test_steps/test_image_precision.py`.
 
 ## Future Work
 
-1. **Remove monolith** — Delete `seg_thick_t2_pipeline.py`, `dosma_knee_seg.py`, `NSM_analysis.py`, `NSM_analysis_bone_only.py` after website integration is verified working with the modular steps.
+1. **Remove TF dependency** — DOSMA models use TF/Keras. Porting to PyTorch (or using ONNX) would eliminate the TF/PyTorch CUDA conflict and simplify the environment.
 
-2. **Remove TF dependency** — DOSMA models use TF/Keras. Porting to PyTorch (or using ONNX) would eliminate the TF/PyTorch CUDA conflict and simplify the environment.
+2. **Config validation** — No schema validation on `config.json`. A validation step on startup would catch misconfigurations early.
 
-3. **Config validation** — No schema validation on `config.json`. A validation step on startup would catch misconfigurations early.
+3. **`run_pipeline.py` is a second orchestrator and nothing watches it** — the website has its own. It must stay thin, and it has been the operative risk three times: a missing `subregions` step after the D7b split, an unchecked `label_remap` skip, and `_get_remap_table()` being D1 living in this repo. Anything it learns that the website already knows is a place the two can drift.
 
-4. **Canonical labels in config** — The `regions` and `bones` sections of `config.json` still use DOSMA-native labels (used by the monolith). After monolith removal, update to canonical labels or remove these sections (the modular pipeline hardcodes bone config in `generate_meshes.py:BONE_CONFIG`).
+*(Done 2026-08-17: the single-process pipeline — `seg_thick_t2_pipeline.py`,
+`dosma_knee_seg.py`, `NSM_analysis.py`, `NSM_analysis_bone_only.py` — and the
+`regions`/`bones` config sections it alone read.)*

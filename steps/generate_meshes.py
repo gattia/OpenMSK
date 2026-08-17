@@ -3,8 +3,6 @@
 Takes a canonical-label segmentation and generates 3D surface meshes for
 each bone, computes cartilage thickness per region, and saves meshes as VTK.
 
-Extracts from seg_thick_t2_pipeline.py lines 346-428.
-
 The femur subregion labels (11-15) are *loaded* from the file the `subregions`
 step writes, not computed here (D7b). They are used for regional thickness and
 nothing else, so they are loaded lazily -- a bones-only model with thickness
@@ -35,8 +33,9 @@ from steps.subregions import FEMUR_SUBREGION_LABELS
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Bone configuration using CANONICAL label indices.
-# The old monolith used DOSMA-native labels (femur=7, fem_cart=2) because it
-# ran before any remapping. This step runs AFTER label_remap.
+# This step runs AFTER label_remap, so it never sees model-native labels
+# (femur=7, fem_cart=2). Segmentations written before label_remap existed use
+# the native scheme; do not point this dict at one.
 BONE_CONFIG = {
     "femur": {
         "tissue_idx": 1,         # CANONICAL femur_bone

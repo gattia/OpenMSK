@@ -27,40 +27,5 @@
     },
     "bscore_bone_only": {
         "path_model_folder": "/path/to/BSCORE_MODELS/NSM_Orig_BScore_Bone_Only_April_18_2025"
-    },
-    "regions": {
-        "cart": {
-            "1": "pat_cart",
-            "2": "fem_cart",
-            "3": "med_tib_cart",
-            "4": "lat_tib_cart",
-            "11": "ant_fem_cart",
-            "12": "med_wb_fem_cart",
-            "13": "lat_wb_fem_cart",
-            "14": "med_post_fem_cart",
-            "15": "lat_post_fem_cart"
-        },
-        "bone": {
-            "7": "femur",
-            "8": "tibia",
-            "9": "patella"
-        }
-    },
-    "bones": {
-        "patella": {
-            "tissue_idx": 9,
-            "list_cart_labels": [1],
-            "n_points": 10000,
-            "crop_percent": null},
-        "femur": {
-            "tissue_idx": 7,
-            "list_cart_labels": [2],
-            "n_points": 20000,
-            "crop_percent": 0.8},
-        "tibia": {
-            "tissue_idx": 8,
-            "list_cart_labels": [3,4],
-            "n_points": 20000,
-            "crop_percent": 0.8}
     }
 }

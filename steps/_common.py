@@ -19,11 +19,11 @@ import SimpleITK as sitk
 # 1e-08 sounds ignorable and is not. It moves marching-cubes vertices by
 # ~1.5e-05 mm, which is enough for pyacvd -- deterministic in itself -- to land
 # on a different clustering, changing even the vertex count, and regional
-# cartilage thickness with it (0.007-0.02 mm). The monolith never showed this
-# because it holds one sitk.Image in memory for the whole run and never reads
-# one back; the steps hand images to each other through files, so from the first
-# handoff on, every step worked in a slightly different frame than segmentation
-# produced.
+# cartilage thickness with it (0.007-0.02 mm). The single-process pipeline that
+# preceded these steps never showed the problem, because it held one sitk.Image
+# in memory for the whole run and never read one back. The steps hand images to
+# each other through files, so from the first handoff on, every step worked in a
+# slightly different frame than segmentation produced.
 #
 # So: steps READ the .nrrd. They still WRITE both -- the .nii.gz is what users
 # download and what the research archive keeps -- but nothing reads it back.

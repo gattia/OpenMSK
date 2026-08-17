@@ -198,7 +198,7 @@ Additional configuration parameters in `config.json`:
 
 ### Run pipeline
 
-The recommended entry point is `run_pipeline.py` (modular pipeline). The old `dosma_knee_seg.py` still works but is kept as a fallback.
+The entry point is `run_pipeline.py`, which chains the steps in `steps/`.
 
 ```bash
 python run_pipeline.py <path_to_image> <path_to_save_results> [model_name] [--config /path/to/config.json]
@@ -229,22 +229,21 @@ python -m steps.run_nsm /path/to/working_dir --options '{"nsm_type": "both"}' --
 python -m steps.compute_bscore /path/to/working_dir --options '{"bscore_type": "both"}' --config config.json
 ```
 
-#### Differences from old pipeline (`dosma_knee_seg.py`)
+#### Reproducibility
 
-The modular pipeline produces the same outputs but with improved reproducibility:
-- **NSM uses the dense (raw) femur mesh** instead of the pyacvd-resampled mesh, eliminating non-determinism from pyacvd cluster initialization
-- **Random seeds are set** before NSM optimization (`torch.manual_seed(42)`, `np.random.seed(42)`), making BScore reproducible across runs on the same input
+- **NSM uses the dense (raw) femur mesh** rather than the pyacvd-resampled mesh, eliminating non-determinism from pyacvd cluster initialization
+- **Random seeds are set** before NSM optimization (`torch.manual_seed(42)`, `np.random.seed(42)`), making BScore reproducible across runs on the same input. The seed goes in **after** `model.cuda()`, which consumes CUDA random state
 - **Seed is configurable** via the `seed` option in `steps.run_nsm` (default: 42, set to `null` for non-deterministic)
 - **GPU memory isolation** — segmentation and NSM fitting run as subprocesses so TensorFlow and PyTorch don't compete for GPU memory
+- **Segmentation is deterministic** — `TF_DETERMINISTIC_OPS` / `TF_CUDNN_DETERMINISTIC` are set in `steps/segment.py` before TensorFlow initialises
+- **Images are handed between steps as `.nrrd`**, not `.nii.gz`, because NIfTI's float32 affine quantises the direction cosines enough to move meshes (see CLAUDE.md Known Issue 8)
 
-If you were using `dosma_knee_seg.py`, switching is just changing the command:
-```bash
-# Old:
-python dosma_knee_seg.py /path/to/image /path/to/output/ [model_name]
-
-# New:
-python run_pipeline.py /path/to/image /path/to/output/ [model_name]
-```
+> **Note:** an older single-process implementation (`dosma_knee_seg.py`,
+> `seg_thick_t2_pipeline.py`, `NSM_analysis*.py`) was removed on 2026-08-17. If you
+> were calling `dosma_knee_seg.py`, the replacement is
+> `python run_pipeline.py /path/to/image /path/to/output/ [model_name]`. Note that
+> its output used DOSMA-native label indices; this pipeline remaps to canonical
+> labels (see the table in CLAUDE.md).
 
 **Input Format Support:**
 - DICOM directories (for full T2 analysis)

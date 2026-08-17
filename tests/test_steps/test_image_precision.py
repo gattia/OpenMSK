@@ -3,15 +3,17 @@
 The steps pass images to each other as files. NIfTI stores the image affine as
 float32, so a ``.nii.gz`` write->read quantises the direction cosine matrix, and
 from the first handoff onward every step would work in a slightly different
-frame than the one segmentation produced. The monolith never showed this: it
-holds one ``sitk.Image`` in memory for the whole run and never reads one back.
+frame than the one segmentation produced. The single-process pipeline that
+preceded these steps never showed the problem, because it held one
+``sitk.Image`` in memory for the whole run and never read one back — which is
+why file-based handoff is the part that has to be pinned.
 
 1.354e-08 on a direction cosine sounds ignorable. It moves marching-cubes
 vertices by ~1.5e-05 mm, which is enough for pyacvd -- deterministic in itself --
 to land on a different clustering, changing even the vertex count (femur 19993
 vs 19994), and with it the surface locations thickness is sampled at: regional
-thickness moved 0.007-0.02 mm, which is what made the orchestrator-vs-monolith
-comparison disagree on ``med_tib_cart_mm_mean``.
+thickness moved 0.007-0.02 mm, which is what made the step-based pipeline
+disagree with its in-memory predecessor on ``med_tib_cart_mm_mean``.
 
 Every step already writes a ``.nrrd`` beside its ``.nii.gz``, and SimpleITK
 writes the NRRD space directions as full-precision decimal text. So the reads

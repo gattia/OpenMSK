@@ -2,9 +2,8 @@
 # Run all integration test scenarios.
 #
 # Usage:
-#   ./tests/integration/run_all.sh              # new pipeline only
-#   ./tests/integration/run_all.sh --compare-old # also compare with old pipeline
-#   ./tests/integration/run_all.sh --skip-nsm    # skip NSM/BScore (faster)
+#   ./tests/integration/run_all.sh              # full pipeline
+#   ./tests/integration/run_all.sh --skip-nsm   # skip NSM/BScore (faster)
 
 set -e
 cd "$(dirname "$0")/../.."

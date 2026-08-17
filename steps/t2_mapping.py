@@ -3,8 +3,6 @@
 Computes T2 maps and per-region T2 statistics. Optionally computes
 depth-dependent T2 metrics if bone meshes are available.
 
-Extracts from seg_thick_t2_pipeline.py lines 433-503.
-
 Precondition: Input must be a two-echo qDESS DICOM series. The orchestrator
 should check the is_qdess flag from segmentation and skip this step if false;
 this step also declines (``skipped: True``) rather than failing if the input
@@ -87,9 +85,14 @@ def read_spoiler_parameter(qdess, tag):
     Returns None when there is no usable value, which is how an anonymised
     scan normally looks. Callers turn that into the low-spoiling fallback.
 
-    Public because the monolith (seg_thick_t2_pipeline.py) imports it: both
-    paths must make the same spoiled/low-spoiling decision, or flipping
-    USE_ORCHESTRATOR would change which estimator a given scan gets.
+    Public, and worth keeping public: the spoiled/low-spoiling decision decides
+    which T2 estimator a scan gets, and the two are not comparable after the
+    fact, so it is tested directly (tests/test_steps/test_t2_mapping.py) rather
+    than only through the step. Anything that needs the same decision must call
+    this rather than reimplement it: while a second implementation of the
+    pipeline existed, its private copy of this logic had to be fixed separately,
+    and until it was, the same scan got a different estimator depending on which
+    path ran it.
 
     Three ways to have no usable value, all treated alike:
       - tag absent (anonymisation stripped it);

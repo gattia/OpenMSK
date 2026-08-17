@@ -1,7 +1,13 @@
 """Run the full knee MRI analysis pipeline.
 
-Chains all steps in-process. Replaces dosma_knee_seg.py as the standalone
-entry point.
+Chains the `steps/` modules. The standalone / dev entry point; the website
+drives the same steps through its own orchestrator.
+
+This is a second orchestrator and nothing watches it, so keep it thin. Every
+piece of pipeline knowledge that lives here is a place it can drift from the
+website's plan -- which it has done three times already (a missing `subregions`
+step after the D7b split, an unchecked `label_remap` skip, and
+`_get_remap_table()` below).
 
 Usage:
     python run_pipeline.py /path/to/image /path/to/output/ [model_name]

@@ -113,8 +113,9 @@ def _compute_bscore(params_file, model_path):
 
     The score is stored under the "Bscore" key of the params file it was computed
     from, alongside the latent vector, so the NSM params file stays
-    self-describing (this is where the monolithic pipeline put it, and where
-    downstream readers still look). `bscore_results.json` remains the
+    self-describing. That key is where every archived params file carries the
+    score and where downstream readers still look, so it is a published
+    interface, not an implementation detail. `bscore_results.json` remains the
     authoritative output, so a params file that cannot be rewritten is logged
     and ignored rather than failing the step.
 

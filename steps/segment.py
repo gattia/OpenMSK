@@ -37,9 +37,6 @@ from steps._common import emit_progress, parse_step_args, write_step_result
 # Must be set BEFORE TensorFlow initialises, which is why this is at module
 # level and not inside run(): TF reads them once, at import. `setdefault` so an
 # operator can still opt out.
-#
-# The monolith carries the same block -- it imports dosma at module import, so
-# it cannot share this one. Change both or neither.
 os.environ.setdefault("TF_DETERMINISTIC_OPS", "1")
 os.environ.setdefault("TF_CUDNN_DETERMINISTIC", "1")
 

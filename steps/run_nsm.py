@@ -1,8 +1,9 @@
 """Step 5: NSM mesh preparation and fitting.
 
 Prepares meshes (knee side detection, left-knee mirroring, femur clipping)
-then fits the Neural Shape Model. Unified replacement for NSM_analysis.py
-and NSM_analysis_bone_only.py.
+then fits the Neural Shape Model. One module covers both the bone+cartilage
+and the bone-only fit; the difference is the ``bone_only`` flag, which selects
+the model config and whether a cartilage mesh takes part.
 
 Outputs reconstructed meshes and NSM_recon_params.json with latent vectors,
 registration parameters, and ASSD error metrics.
@@ -149,7 +150,9 @@ def _convert_icp_transform(icp_transform):
 def fit_nsm(mesh_paths, save_dir, config, bone_only=False, calc_assd=True, seed=42):
     """Fit NSM model to mesh(es).
 
-    Unified replacement for NSM_analysis.py and NSM_analysis_bone_only.py.
+    Thickness is deliberately NOT computed on the reconstruction here. The
+    reconstruction is a template fit, not patient anatomy; thickness comes from
+    the real meshes in generate_meshes.
 
     Args:
         mesh_paths: List of mesh file paths. [bone] for bone_only,

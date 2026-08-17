@@ -26,8 +26,14 @@ def _have_config():
     return os.path.exists("config.json")
 
 
-def _load_volume_monolith_style():
-    """Load volume exactly as seg_thick_t2_pipeline.py does."""
+def _load_volume_directly():
+    """Load the volume the plain way: sitk.ReadImage -> MedicalVolume.from_sitk.
+
+    Deliberately does NOT go through steps.segment._load_image, so it can be
+    imported without pulling in dosma (and therefore TensorFlow). That is the
+    whole point of the comparisons below: this is the control, and _load_image
+    is the thing under test.
+    """
     from dosma import MedicalVolume
     image = sitk.ReadImage(TEST_NRRD)
     return MedicalVolume.from_sitk(image)
@@ -60,7 +66,7 @@ class TestBaselineLoading:
 
     def test_dosma_volume_has_data(self):
         """MedicalVolume.from_sitk should preserve non-zero data."""
-        vol = _load_volume_monolith_style()
+        vol = _load_volume_directly()
         arr = _volume_to_array(vol)
         assert arr.max() > 0, f"MedicalVolume data is all zeros after to_sitk"
 
@@ -95,21 +101,26 @@ class TestBaselineLoading:
             f"This likely indicates TF 2.11 corrupted numpy's C runtime."
         )
 
-    def test_modular_matches_monolith(self):
-        """_load_image and monolith loading should produce identical arrays."""
+    def test_load_image_matches_a_plain_load(self):
+        """_load_image and a plain sitk load should produce identical arrays.
+
+        _load_image imports dosma (and so TensorFlow) before touching the data;
+        the plain load does not. Identical arrays mean the TF import has not
+        changed what gets read.
+        """
         sys.path.insert(0, ".")
         from steps.segment import _load_image
 
-        vol_mod, _, _ = _load_image(TEST_NRRD)
-        vol_mono = _load_volume_monolith_style()
+        vol_step, _, _ = _load_image(TEST_NRRD)
+        vol_plain = _load_volume_directly()
 
-        arr_mod = _volume_to_array(vol_mod)
-        arr_mono = _volume_to_array(vol_mono)
+        arr_step = _volume_to_array(vol_step)
+        arr_plain = _volume_to_array(vol_plain)
 
-        assert arr_mod.shape == arr_mono.shape
-        assert np.array_equal(arr_mod, arr_mono), (
-            f"Data mismatch: modular min/max={arr_mod.min()}/{arr_mod.max()}, "
-            f"monolith min/max={arr_mono.min()}/{arr_mono.max()}"
+        assert arr_step.shape == arr_plain.shape
+        assert np.array_equal(arr_step, arr_plain), (
+            f"Data mismatch: _load_image min/max={arr_step.min()}/{arr_step.max()}, "
+            f"plain load min/max={arr_plain.min()}/{arr_plain.max()}"
         )
 
 
@@ -190,7 +201,7 @@ class TestTorchImportEffect:
     def test_import_torch_then_load(self):
         """Import torch first, then load volume — data should still be valid."""
         import torch
-        vol = _load_volume_monolith_style()
+        vol = _load_volume_directly()
         arr = _volume_to_array(vol)
         assert arr.max() > 0, "Data corrupted after torch import"
 
@@ -200,7 +211,7 @@ class TestTorchImportEffect:
         if torch.cuda.is_available():
             torch.cuda.init()
             _ = torch.zeros(1).cuda()  # Force CUDA initialization
-        vol = _load_volume_monolith_style()
+        vol = _load_volume_directly()
         arr = _volume_to_array(vol)
         assert arr.max() > 0, "Data corrupted after torch CUDA init"
 
@@ -216,7 +227,7 @@ class TestTFImportEffect:
     def test_import_tf_then_load(self):
         """Import TF first, then load volume — data should still be valid."""
         import tensorflow
-        vol = _load_volume_monolith_style()
+        vol = _load_volume_directly()
         arr = _volume_to_array(vol)
         assert arr.max() > 0, "Data corrupted after TF import"
 
@@ -233,7 +244,7 @@ class TestBothFrameworks:
         """Import both TF and torch, then load volume."""
         import tensorflow
         import torch
-        vol = _load_volume_monolith_style()
+        vol = _load_volume_directly()
         arr = _volume_to_array(vol)
         assert arr.max() > 0, (
             "Data corrupted with both TF+torch loaded. "
@@ -244,7 +255,7 @@ class TestBothFrameworks:
         """Import torch first, then TF, then load volume."""
         import torch
         import tensorflow
-        vol = _load_volume_monolith_style()
+        vol = _load_volume_directly()
         arr = _volume_to_array(vol)
         assert arr.max() > 0, "Data corrupted (torch → TF → load)"
 
@@ -254,7 +265,7 @@ class TestBothFrameworks:
         if torch.cuda.is_available():
             _ = torch.zeros(1).cuda()
         import tensorflow
-        vol = _load_volume_monolith_style()
+        vol = _load_volume_directly()
         arr = _volume_to_array(vol)
         assert arr.max() > 0, "Data corrupted (torch CUDA → TF → load)"
 
@@ -286,7 +297,7 @@ volume = MedicalVolume.from_sitk(image)
 with open('config.json') as f:
     config = json.load(f)
 
-from seg_thick_t2_pipeline import segment_image_nnunet
+from steps.segment import segment_image_nnunet
 seg = segment_image_nnunet(volume, 'nnunet_knee', config)
 arr = sitk.GetArrayFromImage(seg)
 unique, counts = np.unique(arr, return_counts=True)
@@ -316,7 +327,7 @@ print(json.dumps(result))
         with open("config.json") as f:
             config = json.load(f)
 
-        from seg_thick_t2_pipeline import segment_image_nnunet
+        from steps.segment import segment_image_nnunet
         seg = segment_image_nnunet(volume, "nnunet_knee", config)
         arr = sitk.GetArrayFromImage(seg)
         unique = np.unique(arr)
