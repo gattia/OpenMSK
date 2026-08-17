@@ -30,7 +30,14 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
-from steps._common import emit_progress, find_file, load_segmentation, parse_step_args, write_step_result
+from steps._common import (
+    emit_progress,
+    find_segmentation,
+    image_prefix,
+    load_segmentation,
+    parse_step_args,
+    write_step_result,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -81,8 +88,7 @@ def run(working_dir, options=None, config=None):
     emit_progress(0, "Loading segmentation")
     sitk_seg = load_segmentation(working_dir)
 
-    seg_path = find_file(working_dir, "*_all-labels.nii.gz")
-    filename_prefix = seg_path.name.replace("_all-labels.nii.gz", "")
+    filename_prefix = image_prefix(find_segmentation(working_dir))
 
     # A bones-only model produces no cartilage at all, and
     # get_knee_segmentation_with_femur_subregions() has nothing to subdivide.

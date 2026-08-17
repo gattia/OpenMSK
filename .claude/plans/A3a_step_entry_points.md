@@ -210,10 +210,18 @@ def load_config(config_path: Path = None) -> dict:
     falls back to config.json in the kneepipeline directory."""
 
 def load_segmentation(working_dir: Path) -> sitk.Image:
-    """Load *_all-labels.nii.gz from working_dir. Raises if not found."""
+    """Load the canonical segmentation. Raises if not found."""
 
 def load_subregions(working_dir: Path) -> sitk.Image:
-    """Load *_subregions-labels.nii.gz from working_dir. Raises if not found."""
+    """Load the femur-subregion labels. Raises if not found."""
+
+def find_segmentation(working_dir: Path) -> Path:
+def find_subregions(working_dir: Path) -> Path:
+    """The path the loaders read -- .nrrd first, .nii.gz as a logged fallback."""
+
+def image_prefix(path: Path) -> str:
+    """`<prefix>_all-labels.{nrrd,nii.gz}` -> `<prefix>`. Format-independent, so
+    output filenames do not change with the format a step happened to read."""
 
 def emit_progress(percent: int, message: str):
     """Print [PROGRESS] line to stdout for orchestrator consumption."""
@@ -222,6 +230,14 @@ def emit_progress(percent: int, message: str):
 def find_file(working_dir: Path, pattern: str) -> Path:
     """Glob for a single file matching pattern. Raises if 0 or >1 matches."""
 ```
+
+**Steps read each other's images as `.nrrd`, not `.nii.gz`** ✅ done
+(`steps/_common.py:find_image_file`). NIfTI stores the affine as float32, so a
+`.nii.gz` write→read quantises the direction cosines. Measured on
+`data/anthonys_knee.nrrd`: direction delta **1.354e-08** through NIfTI, **0.0**
+through NRRD (origin 3.3e-13 / 0.0, spacing 3.6e-15 / 0.0). Both formats are
+still written -- the `.nii.gz` is what users download -- but nothing downstream
+reads it. See the Phase 5 finding below for why 1e-08 matters.
 
 ---
 
@@ -1043,6 +1059,27 @@ compared against old pipeline outputs on real data.
    - Cartilage thickness NOT computed on NSM reconstruction — intentional removal.
 
 5. **Only after validation passes**, remove old scripts in Phase 4 cleanup.
+
+### Finding (2026-08-16): the A/B thickness mismatch was an image-format defect ✅ fixed
+
+`compare_pipelines.py` reported `med_tib_cart_mm_mean` 1.9510 (modular) vs
+1.9438 (monolith), reproducibly on both sides. Not non-determinism -- the
+modular steps handed images to each other through `*_all-labels.nii.gz`, and
+NIfTI's float32 affine quantised the direction cosines by 1.354e-08 at the first
+handoff. The monolith holds one `sitk.Image` in memory for the whole run and
+never reads one back, so only the modular path saw it.
+
+Amplification: 1.35e-08 direction delta → marching-cubes vertices move ~1.5e-05
+mm → pyacvd (deterministic in itself: same mesh twice gives 0.0) lands on a
+different clustering, changing even the point *count* (femur 19993 vs 19994,
+patella 9995 vs 10000) → thickness sampled at different surface locations →
+regional thickness off by 0.007-0.02 mm.
+
+Fixed by routing every inter-step read through `_common.find_image_file()`,
+which prefers the `.nrrd` each step already writes alongside its `.nii.gz`.
+Tolerances in the comparison script are therefore **not** the answer here; the
+two pipelines should agree, and a reappearing 0.00x mm thickness delta means
+some step is reading NIfTI again.
 
 ### What this changes in the phasing
 

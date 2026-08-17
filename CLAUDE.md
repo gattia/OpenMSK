@@ -232,7 +232,9 @@ its `TestLabelMapIntegrity` is what notices if the two repos drift apart.
 
 - **`steps/__init__.py`** — Package init.
 
-- **`steps/_common.py`** — Shared helpers: `parse_step_args()` (CLI arg parsing), `load_config()` (config resolution: explicit path → `KNEEPIPELINE_CONFIG` env → local `config.json`), `load_segmentation()`, `load_subregions()`, `emit_progress()`, `find_file()`.
+- **`steps/_common.py`** — Shared helpers: `parse_step_args()` (CLI arg parsing), `load_config()` (config resolution: explicit path → `KNEEPIPELINE_CONFIG` env → local `config.json`), `load_segmentation()`, `load_subregions()`, `find_segmentation()`, `find_subregions()`, `image_prefix()`, `emit_progress()`, `find_file()`.
+
+  **Steps read each other's label images as `.nrrd`, via `find_image_file()`.** Both formats are still written — the `.nii.gz` is what users download — but nothing reads it back, because NIfTI's float32 affine quantises the direction cosines (Known Issue 8). New steps must go through these helpers rather than globbing `*_all-labels.nii.gz` themselves.
 
 - **`steps/segment.py`** — Image loading (DICOM/NIfTI/NRRD) and segmentation dispatch (DOSMA or nnU-Net). Outputs model-native labels. **Important**: `MedicalVolume.from_sitk()` creates a zero-copy view — the volume must own its data before the sitk image goes out of scope (see `_volume.copy()` fix).
 
@@ -347,6 +349,8 @@ KNEEPIPELINE_CONFIG=/path/to/custom_config.json python run_pipeline.py ...
 6. **Segmentation non-determinism** — TF and nnU-Net produce slightly different results across runs (1-2 voxels for DOSMA, ~84 for nnU-Net). This is GPU floating-point non-determinism, not a code bug.
 
 7. **`sys.path.append` for BScore** — Both the old NSM scripts and `steps/compute_bscore.py` manipulate `sys.path` to import `Bscore` from a configured folder. Consider making BScore a proper installable package.
+
+8. **NIfTI float32 affine — fixed 2026-08-16, do not undo** — NIfTI stores the image affine as float32, so a `.nii.gz` write→read moves the direction cosines by **1.354e-08** (measured on `data/anthonys_knee.nrrd`; NRRD roundtrips it at **0.0**). That is not cosmetic: marching-cubes vertices move ~1.5e-05 mm, pyacvd (deterministic in itself) lands on a different clustering — verified on a real segmentation, tibia vertices then differ by **77 mm** and vertex counts can change — and regional thickness shifts 0.007-0.02 mm. It was the whole reason the modular pipeline disagreed with the monolith on `med_tib_cart_mm_mean` (the monolith holds one image in memory and never reads one back). **Inter-step reads therefore go through the `.nrrd`** (`_common.find_image_file`). Reading a label image with a bare `sitk.ReadImage(...nii.gz)` in a new step reintroduces it. Pinned by `tests/test_steps/test_image_precision.py`.
 
 ## Future Work
 

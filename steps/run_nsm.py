@@ -266,7 +266,7 @@ def _prepare_meshes(working_dir, bone, config):
     """
     working_dir = Path(working_dir)
 
-    # The canonical segmentation, not *_subregions-labels.nii.gz: knee side is
+    # The canonical segmentation, not *_subregions-labels: knee side is
     # read off the medial/lateral tibial cartilage (canonical labels 5 and 6),
     # which are in the segmentation itself. This step used to load the subregions
     # file, which happens to contain them too -- and would then have failed for

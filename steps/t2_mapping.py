@@ -37,7 +37,8 @@ import SimpleITK as sitk
 
 from steps._common import (
     emit_progress,
-    find_file,
+    find_segmentation,
+    image_prefix,
     load_segmentation,
     load_subregions,
     parse_step_args,
@@ -173,9 +174,9 @@ def run(working_dir, options=None, config=None):
     )
     sitk_t2map = t2map.volumetric_map.to_sitk(image_orientation="sagittal")
 
-    # Determine filename prefix
-    seg_path = find_file(working_dir, "*_all-labels.nii.gz")
-    filename_prefix = seg_path.name.replace("_all-labels.nii.gz", "")
+    # Determine filename prefix (independent of which format the segmentation
+    # was read from, so output names never move)
+    filename_prefix = image_prefix(find_segmentation(working_dir))
 
     # Save T2 map
     sitk.WriteImage(sitk_t2map, str(working_dir / f"{filename_prefix}_t2map.nii.gz"), useCompression=False)
@@ -190,7 +191,7 @@ def run(working_dir, options=None, config=None):
         # No subregions step in this job. Whole-region cartilage labels (4-7) live in
         # the segmentation itself; only the femur subregions (11-15) are lost.
         logging.info(
-            "No *_subregions-labels.nii.gz in %s. Computing whole-region T2 only; "
+            "No *_subregions-labels image in %s. Computing whole-region T2 only; "
             "the femur subregion metrics (labels 11-15) are not available.",
             working_dir,
         )

@@ -23,7 +23,8 @@ import SimpleITK as sitk
 
 from steps._common import (
     emit_progress,
-    find_file,
+    find_segmentation,
+    image_prefix,
     load_segmentation,
     load_subregions,
     parse_step_args,
@@ -105,9 +106,10 @@ def run(working_dir, options=None, config=None):
     emit_progress(0, "Loading segmentation")
     sitk_seg = load_segmentation(working_dir)
 
-    # Determine filename prefix from the segmentation file name
-    seg_path = find_file(working_dir, "*_all-labels.nii.gz")
-    filename_prefix = seg_path.name.replace("_all-labels.nii.gz", "")
+    # Determine filename prefix from the segmentation file name. The prefix is
+    # the same whichever format was read -- output names must not move because
+    # the read format did.
+    filename_prefix = image_prefix(find_segmentation(working_dir))
 
     # The femur subregion labels come from the subregions step. They are used
     # only for regional thickness, so they are loaded here rather than at the
@@ -121,7 +123,7 @@ def run(working_dir, options=None, config=None):
             sitk_seg_subregions = load_subregions(working_dir)
         except FileNotFoundError:
             logging.warning(
-                "No *_subregions-labels.nii.gz in %s. Computing whole-region femoral "
+                "No *_subregions-labels image in %s. Computing whole-region femoral "
                 "cartilage thickness instead of the five subregions.",
                 working_dir,
             )
