@@ -208,7 +208,6 @@ def fit_nsm(mesh_paths, save_dir, config, bone_only=False, calc_assd=True, seed=
         convergence_patience=model_config["convergence_patience_recon"],
         clamp_dist=model_config["clamp_dist_recon"],
         fix_mesh=model_config["fix_mesh_recon"],
-        verbose=True,
         return_registration_params=True,
     )
 
