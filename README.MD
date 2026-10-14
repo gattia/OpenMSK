@@ -1,3 +1,30 @@
+# OpenMSK
+
+### Citation
+
+If OpenMSK contributes to your work, please cite:
+
+> Goyal A, Belibi F, Sahani V, Pedersen R, Vainberg Y, Williams A, Chu C, Haddock B,
+> Gold GE, Chaudhari AS, Kogan F, Gatti AA. *OpenMSK: A modular open-source framework
+> for comprehensive analysis of imaging biomarkers in knee osteoarthritis.*
+> Osteoarthritis and Cartilage Open. 2026;8(4):100886.
+> [doi:10.1016/j.ocarto.2026.100886](https://www.sciencedirect.com/science/article/pii/S2665913126001445)
+
+```bibtex
+@article{goyal2026openmsk,
+  title   = {OpenMSK: A modular open-source framework for comprehensive analysis of imaging biomarkers in knee osteoarthritis},
+  author  = {Goyal, Ananya and Belibi, Francesca and Sahani, Vyoma and Pedersen, Rune and Vainberg, Yael and Williams, Ashley and Chu, Constance and Haddock, Bryan and Gold, Garry E. and Chaudhari, Akshay S. and Kogan, Feliks and Gatti, Anthony A.},
+  journal = {Osteoarthritis and Cartilage Open},
+  volume  = {8},
+  number  = {4},
+  pages   = {100886},
+  year    = {2026},
+  issn    = {2665-9131},
+  doi     = {10.1016/j.ocarto.2026.100886},
+  url     = {https://www.sciencedirect.com/science/article/pii/S2665913126001445}
+}
+```
+
 ### Environment Creation
 
 - Dependencies are: 
