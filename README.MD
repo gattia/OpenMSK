@@ -35,8 +35,8 @@ If OpenMSK contributes to your work, please cite:
 
 ```
 # create environment
-# Python must be exactly 3.10: NSM requires >=3.9, nnunet_knee_inference requires
-# >=3.10, and TensorFlow 2.11 (needed for the DOSMA models) has no wheels past 3.10.
+# Python must be exactly 3.10: NSM requires >=3.9, nnunetv2 requires >=3.10,
+# and TensorFlow 2.11 (needed for the DOSMA models) has no wheels past 3.10.
 conda create -n kneepipeline_310 python=3.10
 conda activate kneepipeline_310
 
@@ -44,8 +44,8 @@ conda activate kneepipeline_310
 conda install -c conda-forge cmake
 conda install -c conda-forge lit
 
-# make directory to download and install dependencies
-mkdir DEPENDENCIES
+# download and install dependencies into DEPENDENCIES/ (run from the repo root;
+# the folder already exists in a fresh clone because it holds a submodule)
 cd DEPENDENCIES
 
 # Install NSM
@@ -57,7 +57,10 @@ cd nsm
 # is also deprecated -- no conda packages after 2.5.)
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-make requirements
+# NSM's dependencies are in requirements.txt, not in its package metadata, so
+# `pip install .` alone does not install them. Torch is already installed above,
+# so this keeps the CUDA build.
+pip install -r requirements.txt
 pip install .
 
 # to download NSM models, install huggingface API
@@ -91,7 +94,6 @@ git submodule update --init --recursive
 cd DEPENDENCIES/nnunet_knee_inference
 # Follow install instructions in that repo's README for nnU-Net setup
 
-# IF HAVING ISSUES WITH TF, INSTALL VERSION 2.11 (pip install tensorflow==2.11)
 # If TensorFlow still can't find GPU, ensure LD_LIBRARY_PATH includes conda lib:
 # export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 ```
@@ -108,7 +110,7 @@ This environment requires both **TensorFlow/Keras** (for DOSMA segmentation mode
 - Install `cudatoolkit=11.8` and `cudnn=8.2` (see installation steps above)
 - Native Windows: TensorFlow has no GPU support after 2.10, so skip the CUDA 11.8 install; DOSMA runs on the CPU. Use WSL2 for GPU segmentation
 - Set `LD_LIBRARY_PATH` to include conda's lib directory when running the pipeline
-- For systemd services, add: `Environment="LD_LIBRARY_PATH=/path/to/conda/envs/kneepipeline/lib"`
+- For systemd services, add: `Environment="LD_LIBRARY_PATH=/path/to/conda/envs/kneepipeline_310/lib"`
 
 **Symptoms of CUDA mismatch:**
 
@@ -278,7 +280,7 @@ You can also run individual steps for more control:
 
 ```bash
 python -m steps.segment /path/to/working_dir --config config.json
-python -m steps.label_remap /path/to/working_dir --options '{"remap_table": {"1":7,"2":4,"3":5,"4":6,"7":1,"8":2,"9":3}}'
+python -m steps.label_remap /path/to/working_dir --options '{"remap_table": {"1":7,"2":4,"3":5,"4":6,"5":8,"6":9,"7":1,"8":2,"9":3}}'
 python -m steps.generate_meshes /path/to/working_dir --config config.json
 python -m steps.t2_mapping /path/to/working_dir --config config.json
 python -m steps.run_nsm /path/to/working_dir --options '{"nsm_type": "both"}' --config config.json
