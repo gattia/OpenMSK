@@ -27,15 +27,18 @@ If OpenMSK contributes to your work, please cite:
 
 ### Environment Creation
 
-- Dependencies are: 
-    - DOSMA (bone_seg branch)
-    - pymskt
-    - NSM
-    - nnunetv2
+- Dependencies are:
+  - DOSMA (bone_seg branch)
+  - pymskt
+  - NSM
+  - nnunetv2
+
 ```
 # create environment
-conda create -n knee_pipeline python=3.8
-conda activate knee_pipeline
+# Python must be exactly 3.10: NSM requires >=3.9, nnunet_knee_inference requires
+# >=3.10, and TensorFlow 2.11 (needed for the DOSMA models) has no wheels past 3.10.
+conda create -n kneepipeline_310 python=3.10
+conda activate kneepipeline_310
 
 # install non-python dependcies
 conda install -c conda-forge cmake
@@ -48,7 +51,11 @@ cd DEPENDENCIES
 # Install NSM
 git clone https://github.com/gattia/nsm
 cd nsm
-conda install pytorch torchvision torchaudio pytorch-cuda -c pytorch -c nvidia
+# Install PyTorch from pip, NOT conda. The pip wheels carry their own CUDA 12
+# runtime, so conda never sees it; conda's `pytorch-cuda` pins `cuda-version` to 12.x
+# and makes the cudatoolkit=11.8 install below unsolvable. (PyTorch's conda channel
+# is also deprecated -- no conda packages after 2.5.)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 make requirements
 pip install .
@@ -56,22 +63,30 @@ pip install .
 # to download NSM models, install huggingface API
 pip install huggingface-hub
 
-# Install CUDA 11.8 and cuDNN 8.2 for TensorFlow GPU support
+# Install CUDA 11.8 and cuDNN 8.2 for TensorFlow GPU support (LINUX / WSL2 ONLY)
 # CRITICAL: TensorFlow 2.11 requires CUDA 11.x and cuDNN 8.x
-# PyTorch uses CUDA 12 but both can coexist
+# PyTorch uses CUDA 12 but both can coexist, provided PyTorch came from pip (above)
+# Native Windows: SKIP this step. TensorFlow dropped GPU support on native Windows
+# after 2.10, so 2.11 runs DOSMA on the CPU regardless. NSM (PyTorch) still uses the GPU.
 conda install -c conda-forge cudatoolkit=11.8 cudnn=8.2 -y
 
-# Install DOSMA
+# Install DOSMA (clone into DEPENDENCIES/, next to nsm/ -- not inside it)
+cd ..
 git clone https://github.com/gattia/DOSMA
 cd DOSMA
 git checkout bone_seg
-pip install '.[ai]'
+# Pin TensorFlow FIRST: DOSMA's [ai] extra is an unbounded "tensorflow>=2.0.0", which
+# otherwise pulls the newest TF (Keras 3 / NumPy 2) and breaks the .h5 models.
+# Double quotes, not single: Windows cmd passes single quotes through literally.
+pip install "tensorflow==2.11" "keras<3" "numpy==1.24.3"
+pip install ".[ai]"
 
 # Install pymskt - this is superfluous becuase its already included in NSM
 pip install mskt
 
 # Install nnU-Net inference
-# For new clones or after pulling submodule changes:
+# For new clones or after pulling submodule changes (run from the repo root):
+cd ../..
 git submodule update --init --recursive
 cd DEPENDENCIES/nnunet_knee_inference
 # Follow install instructions in that repo's README for nnU-Net setup
@@ -88,11 +103,15 @@ This environment requires both **TensorFlow/Keras** (for DOSMA segmentation mode
 #### CUDA Version Requirements (Critical for GPU Support)
 
 **TensorFlow 2.11 requires CUDA 11.x**, while PyTorch typically uses CUDA 12.x. Both can coexist in the same conda environment:
+
+- Install PyTorch with **pip**, not conda. Conda's `pytorch-cuda` pins `cuda-version` to 12.x, and `cudatoolkit=11.8` then fails with `Could not solve for environment specs ... pytorch-cuda ... requires cuda-cudart-dev`
 - Install `cudatoolkit=11.8` and `cudnn=8.2` (see installation steps above)
+- Native Windows: TensorFlow has no GPU support after 2.10, so skip the CUDA 11.8 install; DOSMA runs on the CPU. Use WSL2 for GPU segmentation
 - Set `LD_LIBRARY_PATH` to include conda's lib directory when running the pipeline
 - For systemd services, add: `Environment="LD_LIBRARY_PATH=/path/to/conda/envs/kneepipeline/lib"`
 
 **Symptoms of CUDA mismatch:**
+
 ```
 Could not load dynamic library 'libcudart.so.11.0'
 Could not load dynamic library 'libcudnn.so.8'
@@ -101,17 +120,18 @@ The Conv2D op currently only supports the NHWC tensor format on the CPU
 
 These packages also have conflicting NumPy version requirements:
 
-| Package | NumPy Requirement | Notes |
-|---------|-------------------|-------|
-| TensorFlow 2.11 | < 2.0 (compiled for NumPy 1.x) | Required for DOSMA `.h5` model loading |
-| Keras < 3 | < 2.0 | Needed to avoid `groups` argument errors in Conv2DTranspose |
-| nnunetv2 | >= 1.24 | Modern deep learning segmentation |
-| scikit-image | >= 1.24 | Image processing utilities |
-| PyTorch 2.x | 1.x or 2.x | Supports both versions |
+| Package         | NumPy Requirement              | Notes                                                         |
+| --------------- | ------------------------------ | ------------------------------------------------------------- |
+| TensorFlow 2.11 | < 2.0 (compiled for NumPy 1.x) | Required for DOSMA `.h5` model loading                      |
+| Keras < 3       | < 2.0                          | Needed to avoid `groups` argument errors in Conv2DTranspose |
+| nnunetv2        | >= 1.24                        | Modern deep learning segmentation                             |
+| scikit-image    | >= 1.24                        | Image processing utilities                                    |
+| PyTorch 2.x     | 1.x or 2.x                     | Supports both versions                                        |
 
 #### Symptoms of NumPy Incompatibility
 
 If you see errors like:
+
 ```
 A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x
 AttributeError: _ARRAY_API not found
@@ -123,6 +143,7 @@ This means your NumPy version is too new (2.x) for TensorFlow 2.11.
 #### Symptoms of Keras 2/3 Incompatibility
 
 If you see errors like:
+
 ```
 ValueError: Unrecognized keyword arguments passed to Conv2DTranspose: {'groups': 1}
 ```
@@ -152,6 +173,7 @@ python -c "import numpy; import torch; import tensorflow; print(f'NumPy: {numpy.
 #### TensorRT Warnings (Safe to Ignore)
 
 Warnings about missing `libnvinfer.so.7` are related to optional TensorRT GPU optimization and do not affect model inference:
+
 ```
 Could not load dynamic library 'libnvinfer.so.7'
 TF-TRT Warning: Cannot dlopen some TensorRT libraries
@@ -160,7 +182,8 @@ TF-TRT Warning: Cannot dlopen some TensorRT libraries
 ### Download models from huggingface
 
 Download NSM HF Models using instructions on: https://github.com/gattia/ShapeMedKnee/
-Also, instructions are below: 
+Also, instructions are below:
+
 ```bash
 huggingface-cli login
 ```
@@ -168,10 +191,11 @@ huggingface-cli login
 Once you run the above, you will then input your access token from huggingface.
 You will need to have/create a hugginface account, and then can get the access
 token by:
+
 - login to huggingface
 - click on user icon in top right
 - click settings
-- click "access tokens" on the left 
+- click "access tokens" on the left
 - click "Create new token" on left (topish)
 - copy the token and input into the commandline prompt
 
@@ -180,10 +204,11 @@ token by:
 from huggingface_hub import snapshot_download
 snapshot_download(repo_id="aagatti/ShapeMedKnee", local_dir='./NSM_MODELS')
 ```
+
 That will download the NSM models into the current directory in a folder
 called: `NSM_MODELS`. This will contain both the neural shape model itself
 and it will also contain a function and parameters needed to compute a BScore
-from the fitted NSM latent vector. 
+from the fitted NSM latent vector.
 
 Download the DOSMA weights so you can perform the segmentation:
 
@@ -202,8 +227,9 @@ downloaded files - RESAVE IT AS `config.json`:
     - nsm/path_model_state: update to path of the nsm model state (`2000.pth`)
     - bscore/path_model_folder: update to folder where bscore json and .py script saved
 
-There is currently a parameter in the config.json that 
-determines if the pipeline will perform the NSM analyses. 
+There is currently a parameter in the config.json that
+determines if the pipeline will perform the NSM analyses.
+
 ```
 "perform_bone_only_nsm": false,
 "perform_bone_and_cart_nsm": true,
@@ -211,7 +237,7 @@ determines if the pipeline will perform the NSM analyses.
 
 By default, it fits the NSM to the bone+cartilage, but does
 not do it for the bone only model. The bone only model is
-not currently public - please reach out if it is of interest.. 
+not currently public - please reach out if it is of interest..
 
 If you do not want to do any NSM analyses, this can be turned
 off, by setting `perform_bone_and_cart_nsm` to `false`.
@@ -219,7 +245,8 @@ off, by setting `perform_bone_and_cart_nsm` to `false`.
 ### Key Configuration Options
 
 Additional configuration parameters in `config.json`:
-- `clip_femur_top`: (true/false) - Clips the superior portion of femur meshes during NSM preprocessing 
+
+- `clip_femur_top`: (true/false) - Clips the superior portion of femur meshes during NSM preprocessing
 - `batch_size`: (default: 32) - Batch size for segmentation model inference
 - `default_seg_model`: (default: "goyal_sagittal") - Default segmentation model when none specified
 
@@ -232,6 +259,7 @@ python run_pipeline.py <path_to_image> <path_to_save_results> [model_name] [--co
 ```
 
 **Examples:**
+
 ```bash
 # Use default DOSMA model
 python run_pipeline.py /path/to/image.nii.gz /path/to/results/
@@ -247,6 +275,7 @@ python run_pipeline.py /path/to/image.nii.gz /path/to/results/ --config /path/to
 ```
 
 You can also run individual steps for more control:
+
 ```bash
 python -m steps.segment /path/to/working_dir --config config.json
 python -m steps.label_remap /path/to/working_dir --options '{"remap_table": {"1":7,"2":4,"3":5,"4":6,"7":1,"8":2,"9":3}}'
@@ -273,18 +302,21 @@ python -m steps.compute_bscore /path/to/working_dir --options '{"bscore_type": "
 > labels (see the table in CLAUDE.md).
 
 **Input Format Support:**
+
 - DICOM directories (for full T2 analysis)
 - NIfTI files (`.nii`, `.nii.gz`) - RSS/preprocessed images
 - NRRD files (`.nrrd`)
 
 **Model Selection:**
 The pipeline supports multiple segmentation methods:
+
 - **DOSMA models**: `goyal_sagittal` (default), `goyal_coronal`, `goyal_axial`, `staple`
 - **nnU-Net models**: `nnunet_knee` - high-performance deep learning segmentation
 
 The pipeline automatically detects the segmentation method based on the model name prefix. nnU-Net models provide state-of-the-art performance but require additional setup (see installation above).
 
 **T2 Analysis Requirements:**
+
 - T2 mapping requires a **two-echo qDESS DICOM** input. The GL (spoiler gradient area) and TG (spoiler duration) private tags are *not* required: when they are missing — the normal state of anonymised DICOM — the Sveinsson low-spoiling equations are used instead, and the step reports `t2_method: "low_spoiling"` rather than `"spoiled"`. The two estimators differ by −1.4% at 10-20 ms up to −5.4% at 60-80 ms, so the label matters and is carried onto the analysis record
 - These tags may be removed during DICOM anonymization processes
 - T2 values are automatically clipped to the physiological range of 0-80ms
@@ -293,29 +325,28 @@ The pipeline automatically detects the segmentation method based on the model na
 ### Results
 
 All results will be saved in <path_to_save_results>. This will include
+
 - segmentations in .nii.gz and .nrrd format
 - results.csv and results.json files with the thickness and T2 results by region
-- meshes for the bones and cartilage: 
-    - femur, tibia, patella, fem cart, med tib cart (0), lat tib cart (1), pat cart
+- meshes for the bones and cartilage:
+  - femur, tibia, patella, fem cart, med tib cart (0), lat tib cart (1), pat cart
 - femur meshes pre-processed for the NSM:
-    - femur_mesh_NSM_orig.vtk
-    - fem_cart_mesh_NSM_orig.vtk
+  - femur_mesh_NSM_orig.vtk
+  - fem_cart_mesh_NSM_orig.vtk
 - Results from the NSM analysis:
-    - reconstructed meshes using NSM:
-        - NSM_recon_femur_mesh_NSM_orig.vtk
-        - NSM_recon_fem_cart_mesh_NSM_orig.vtk
-    - NSM fitted parameters in NSM_recon_params.json
-        - NSM fitted latent vector (length 512)
-        - BScore: osteoarthritis severity score derived from shape patterns learned on the Osteoarthritis Initiative dataset
-        - registration parameters used to align femur in NSM space
-        - assd metrics for the error in the reconstructed bone/cart surfaces. 
+  - reconstructed meshes using NSM:
+    - NSM_recon_femur_mesh_NSM_orig.vtk
+    - NSM_recon_fem_cart_mesh_NSM_orig.vtk
+  - NSM fitted parameters in NSM_recon_params.json
+    - NSM fitted latent vector (length 512)
+    - BScore: osteoarthritis severity score derived from shape patterns learned on the Osteoarthritis Initiative dataset
+    - registration parameters used to align femur in NSM space
+    - assd metrics for the error in the reconstructed bone/cart surfaces.
 
+If doing work in notebooks to test then follow below:
 
+Do work in notebook, need to start job on node and connect to node to run notebook.
 
-
-If doing work in notebooks to test then follow below: 
-
-Do work in notebook, need to start job on node and connect to node to run notebook. 
 ```
 ON SERVER: 
 salloc -c 4 --gres=gpu:2080ti:1 --mem=24gb --time=1-00
